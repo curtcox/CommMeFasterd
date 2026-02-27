@@ -1,1 +1,34 @@
+# Dependencies
 node_modules/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# macOS
+.DS_Store
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Build/package output
+dist/
+out/
+release/
+build/
+
+# Electron tooling
+.electron/
+
+# Coverage and caches
+coverage/
+.nyc_output/
+.cache/
+
+# IDE/editor
+.vscode/
+.idea/
