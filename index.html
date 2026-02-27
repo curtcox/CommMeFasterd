@@ -20,29 +20,96 @@
 
     <main id="settings-panel" class="settings hidden">
       <section class="settings-card">
-        <h2>Automation Rules</h2>
-        <p>Small first step: define what action to plan when a message is received in a specific tab.</p>
-        <form id="rule-form">
+        <h2>LLM Provider Settings</h2>
+        <form id="llm-form">
           <label>
-            Trigger tab
-            <select id="trigger-tab"></select>
-          </label>
-          <label>
-            Action
-            <select id="action-type">
-              <option value="send_message">Send message</option>
-              <option value="schedule_meeting">Schedule meeting</option>
-              <option value="research_past_conversation">Research past conversation</option>
-              <option value="initiate_new_conversation">Initiate new conversation</option>
+            Provider
+            <select id="llm-provider">
+              <option value="openai">OpenAI</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="gemini">Gemini</option>
+              <option value="openrouter">OpenRouter</option>
             </select>
           </label>
           <label>
-            Details
-            <input id="action-details" type="text" placeholder="Example: draft response to PM team" />
+            Model
+            <input id="llm-model" type="text" placeholder="gpt-4.1-mini / claude / gemini / etc." />
           </label>
-          <button type="submit">Add rule</button>
+          <label>
+            Endpoint override (optional)
+            <input id="llm-endpoint" type="text" placeholder="https://..." />
+          </label>
+          <label>
+            API key
+            <input id="llm-api-key" type="password" placeholder="Provider API key" />
+          </label>
+          <button type="submit">Save LLM Settings</button>
         </form>
-        <ul id="rules-list"></ul>
+      </section>
+
+      <section class="settings-card">
+        <h2>Actions</h2>
+        <p>Describe actions in plain text. Code is generated and can be inspected.</p>
+        <form id="action-form">
+          <label>
+            Action name
+            <input id="action-name" type="text" placeholder="Draft reply to urgent DMs" />
+          </label>
+          <label>
+            Action kind
+            <select id="action-kind">
+              <option value="send_message">send_message</option>
+              <option value="schedule_meeting">schedule_meeting</option>
+              <option value="research_past_conversation">research_past_conversation</option>
+              <option value="initiate_new_conversation">initiate_new_conversation</option>
+              <option value="custom">custom</option>
+            </select>
+          </label>
+          <label>
+            Action instructions (plain text)
+            <textarea id="action-instructions" rows="4" placeholder="When this action runs, summarize context and draft a concise message."></textarea>
+          </label>
+          <label>
+            Schedule text
+            <input id="action-schedule" type="text" placeholder="always | daily 09:00 | weekdays 14:30 | once 2026-03-01T13:00:00Z" />
+          </label>
+          <label class="inline-check">
+            <input id="action-use-llm" type="checkbox" />
+            Use configured LLM to generate action code (fallbacks to local template)
+          </label>
+          <button type="submit">Add Action</button>
+        </form>
+        <ul id="actions-list"></ul>
+      </section>
+
+      <section class="settings-card">
+        <h2>Triggers</h2>
+        <p>Define plain-text trigger logic and map it to one or more actions.</p>
+        <form id="trigger-form">
+          <label>
+            Trigger name
+            <input id="trigger-name" type="text" placeholder="Urgent incident trigger" />
+          </label>
+          <label>
+            Source tab
+            <select id="trigger-source-tab"></select>
+          </label>
+          <label>
+            Trigger match text (plain text or regex)
+            <textarea id="trigger-match-text" rows="4" placeholder="urgent, sev1, incident OR regex: (sev|p)\\d"></textarea>
+          </label>
+          <label>
+            Schedule text
+            <input id="trigger-schedule" type="text" placeholder="always | weekdays 09:30 | weekly monday 10:00 | between 2026-03-01 and 2026-03-31" />
+          </label>
+          <fieldset id="trigger-action-picker" class="picker"></fieldset>
+          <label class="inline-check">
+            <input id="trigger-use-llm" type="checkbox" />
+            Use configured LLM to generate trigger code (fallbacks to local template)
+          </label>
+          <button type="submit">Add Trigger</button>
+        </form>
+        <ul id="triggers-list"></ul>
       </section>
 
       <section class="settings-card">
@@ -54,14 +121,37 @@
           </label>
           <label>
             Message title
-            <input id="simulate-title" type="text" placeholder="Urgent: incident update" />
+            <input id="simulate-title" type="text" placeholder="Urgent: production issue" />
           </label>
           <label>
             Message body
-            <input id="simulate-body" type="text" placeholder="Can you jump on a quick call?" />
+            <textarea id="simulate-body" rows="3" placeholder="Can you jump in for triage and draft a status update?"></textarea>
           </label>
-          <button type="submit">Run simulation</button>
+          <button type="submit">Run Simulation</button>
         </form>
+      </section>
+
+      <section class="settings-card">
+        <h2>Trigger Match History</h2>
+        <p>Inspect what past messages a trigger did or did not apply to.</p>
+        <label>
+          Trigger
+          <select id="history-trigger-select"></select>
+        </label>
+        <ul id="trigger-history-list"></ul>
+      </section>
+
+      <section class="settings-card">
+        <h2>Schedule Inspector</h2>
+        <p>Check what triggers/actions are active at any past or future time.</p>
+        <form id="schedule-inspect-form">
+          <label>
+            Timestamp
+            <input id="schedule-inspect-at" type="datetime-local" />
+          </label>
+          <button type="submit">Inspect Schedule</button>
+        </form>
+        <ul id="schedule-inspection-list"></ul>
       </section>
 
       <section class="settings-card">
