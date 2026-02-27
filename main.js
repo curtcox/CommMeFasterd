@@ -98,7 +98,7 @@ function broadcast(channel, payload) {
 
 function dbRun(sql, params = []) {
   return new Promise((resolve, reject) => {
-    if (!dbReady || !db) {
+    if (!db) {
       resolve(null);
       return;
     }
@@ -114,7 +114,7 @@ function dbRun(sql, params = []) {
 
 function dbGet(sql, params = []) {
   return new Promise((resolve, reject) => {
-    if (!dbReady || !db) {
+    if (!db) {
       resolve(null);
       return;
     }
@@ -130,7 +130,7 @@ function dbGet(sql, params = []) {
 
 function dbAll(sql, params = []) {
   return new Promise((resolve, reject) => {
-    if (!dbReady || !db) {
+    if (!db) {
       resolve([]);
       return;
     }
