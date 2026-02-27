@@ -1,6 +1,12 @@
-const fs = require("fs");
 const path = require("path");
 const { app, BrowserWindow, BrowserView, ipcMain } = require("electron");
+
+let sqlite3 = null;
+try {
+  sqlite3 = require("sqlite3").verbose();
+} catch (_error) {
+  sqlite3 = null;
+}
 
 const TAB_BAR_HEIGHT = 100;
 const MAX_EVENTS = 400;
@@ -13,7 +19,8 @@ const TABS = [
   { id: "office", label: "Office", url: "https://www.office.com", type: "web" },
   { id: "gmail", label: "Gmail", url: "https://mail.google.com", type: "web" },
   { id: "calendar", label: "Google Calendar", url: "https://calendar.google.com", type: "web" },
-  { id: "settings", label: "Settings", type: "local" }
+  { id: "settings", label: "Settings", type: "local" },
+  { id: "database", label: "Database", type: "local" }
 ];
 
 const DAY_TO_INDEX = {
@@ -31,7 +38,12 @@ let mainWindow = null;
 /** @type {Map<string, BrowserView>} */
 const tabViews = new Map();
 let activeTabId = "slack";
-let stateFilePath = "";
+
+/** @type {import("sqlite3").Database | null} */
+let db = null;
+let dbPath = "";
+let dbReady = false;
+let dbError = "";
 
 const automationEvents = [];
 const messageHistory = [];
@@ -84,15 +96,238 @@ function broadcast(channel, payload) {
   }
 }
 
-function pushAutomationEvent(event) {
-  const decorated = {
-    ...event,
-    createdAt: nowIso()
-  };
-  automationEvents.unshift(decorated);
-  trimArraySize(automationEvents, MAX_EVENTS);
-  broadcast("automation:event", decorated);
-  persistState();
+function dbRun(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    if (!dbReady || !db) {
+      resolve(null);
+      return;
+    }
+    db.run(sql, params, function onRun(err) {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve(this);
+    });
+  });
+}
+
+function dbGet(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    if (!dbReady || !db) {
+      resolve(null);
+      return;
+    }
+    db.get(sql, params, (err, row) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve(row || null);
+    });
+  });
+}
+
+function dbAll(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    if (!dbReady || !db) {
+      resolve([]);
+      return;
+    }
+    db.all(sql, params, (err, rows) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve(rows || []);
+    });
+  });
+}
+
+function fireAndForgetDb(promise) {
+  promise.catch((_error) => {
+    // Keep app responsive even if DB writes fail.
+  });
+}
+
+async function initDatabase() {
+  if (!sqlite3) {
+    dbReady = false;
+    dbError = "sqlite3 dependency is not installed. Run npm install.";
+    return;
+  }
+
+  dbPath = path.join(app.getPath("userData"), "commmefasterd.sqlite");
+  db = await new Promise((resolve, reject) => {
+    const instance = new sqlite3.Database(dbPath, (err) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve(instance);
+    });
+  });
+
+  await dbRun("PRAGMA journal_mode = WAL");
+  await dbRun("PRAGMA foreign_keys = ON");
+
+  await dbRun(`CREATE TABLE IF NOT EXISTS llm_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    provider TEXT NOT NULL,
+    api_key TEXT,
+    model TEXT,
+    endpoint_override TEXT,
+    updated_at TEXT NOT NULL
+  )`);
+
+  await dbRun(`CREATE TABLE IF NOT EXISTS actions (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    instructions TEXT NOT NULL,
+    schedule_text TEXT NOT NULL,
+    schedule_json TEXT NOT NULL,
+    enabled INTEGER NOT NULL,
+    generated_code TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`);
+
+  await dbRun(`CREATE TABLE IF NOT EXISTS triggers (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    source_tab TEXT NOT NULL,
+    match_text TEXT NOT NULL,
+    schedule_text TEXT NOT NULL,
+    schedule_json TEXT NOT NULL,
+    action_ids_json TEXT NOT NULL,
+    enabled INTEGER NOT NULL,
+    generated_code TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`);
+
+  await dbRun(`CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    tab_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    payload_json TEXT NOT NULL
+  )`);
+
+  await dbRun(`CREATE TABLE IF NOT EXISTS trigger_evaluations (
+    id TEXT PRIMARY KEY,
+    trigger_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    matched INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )`);
+
+  await dbRun(`CREATE TABLE IF NOT EXISTS automation_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    payload_json TEXT NOT NULL
+  )`);
+
+  await dbRun(`CREATE TABLE IF NOT EXISTS app_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    tab_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL
+  )`);
+
+  dbReady = true;
+  dbError = "";
+}
+
+async function loadStateFromDb() {
+  if (!dbReady) {
+    return;
+  }
+
+  const settingsRow = await dbGet("SELECT provider, api_key, model, endpoint_override FROM llm_settings WHERE id = 1");
+  if (settingsRow) {
+    llmSettings = {
+      provider: settingsRow.provider || "openai",
+      apiKey: settingsRow.api_key || "",
+      model: settingsRow.model || "",
+      endpointOverride: settingsRow.endpoint_override || ""
+    };
+  }
+
+  const actionRows = await dbAll("SELECT * FROM actions ORDER BY created_at DESC");
+  actionRows.forEach((row) => {
+    const action = {
+      id: row.id,
+      name: row.name,
+      kind: row.kind,
+      instructions: row.instructions,
+      scheduleText: row.schedule_text,
+      schedule: JSON.parse(row.schedule_json),
+      enabled: Boolean(row.enabled),
+      generatedCode: row.generated_code,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+    actions.set(action.id, action);
+  });
+
+  const triggerRows = await dbAll("SELECT * FROM triggers ORDER BY created_at DESC");
+  triggerRows.forEach((row) => {
+    const trigger = {
+      id: row.id,
+      name: row.name,
+      sourceTab: row.source_tab,
+      matchText: row.match_text,
+      scheduleText: row.schedule_text,
+      schedule: JSON.parse(row.schedule_json),
+      actionIds: JSON.parse(row.action_ids_json),
+      enabled: Boolean(row.enabled),
+      generatedCode: row.generated_code,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+    triggers.set(trigger.id, trigger);
+  });
+
+  const messageRows = await dbAll("SELECT * FROM messages ORDER BY created_at DESC LIMIT ?", [MAX_MESSAGES]);
+  messageRows.forEach((row) => {
+    messageHistory.push({
+      id: row.id,
+      createdAt: row.created_at,
+      tabId: row.tab_id,
+      source: row.source,
+      title: row.title,
+      body: row.body
+    });
+  });
+
+  const evalRows = await dbAll("SELECT * FROM trigger_evaluations ORDER BY created_at DESC LIMIT ?", [MAX_EVALUATIONS]);
+  evalRows.forEach((row) => {
+    triggerEvaluations.push({
+      id: row.id,
+      triggerId: row.trigger_id,
+      messageId: row.message_id,
+      matched: Boolean(row.matched),
+      reason: row.reason,
+      createdAt: row.created_at
+    });
+  });
+
+  const eventRows = await dbAll("SELECT created_at, kind, payload_json FROM automation_events ORDER BY id DESC LIMIT ?", [MAX_EVENTS]);
+  eventRows.forEach((row) => {
+    const payload = JSON.parse(row.payload_json || "{}");
+    automationEvents.push({
+      createdAt: row.created_at,
+      kind: row.kind,
+      ...payload
+    });
+  });
 }
 
 function parseTimeToken(token) {
@@ -299,7 +534,6 @@ function baseActionCode(action) {
     `// Schedule text: ${action.scheduleText || "always"}`,
     "",
     "async function runAction(context) {",
-    "  // context includes message payload and trigger metadata",
     "  const { message, trigger } = context;",
     "  const prompt = [",
     `    "Action kind: " + ${actionKindLiteral},`,
@@ -308,10 +542,9 @@ function baseActionCode(action) {
     "    \"Message body: \" + (message.body || \"\")",
     "  ].join(\"\\n\");",
     "",
-    "  // Optional: call your configured LLM provider if needed.",
-    "  // Replace this with real API calls in your runtime worker.",
     "  return {",
     "    status: 'planned',",
+    "    prompt,",
     "    summary: `Will execute ${action.kind} for trigger ${trigger.name}`",
     "  };",
     "}",
@@ -360,10 +593,7 @@ async function maybeGenerateWithLlm(kind, sourcePrompt) {
     if (provider === "openai") {
       const response = await fetch(endpoint, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`
-        },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
           model: llmSettings.model || "gpt-4.1-mini",
           input: `Generate only JavaScript code for a ${kind}.\n${sourcePrompt}`
@@ -374,10 +604,7 @@ async function maybeGenerateWithLlm(kind, sourcePrompt) {
       }
       const data = await response.json();
       const text = Array.isArray(data.output)
-        ? data.output
-            .flatMap((item) => item.content || [])
-            .map((x) => x.text || "")
-            .join("\n")
+        ? data.output.flatMap((item) => item.content || []).map((x) => x.text || "").join("\n")
         : "";
       return text.trim() || null;
     }
@@ -429,10 +656,7 @@ async function maybeGenerateWithLlm(kind, sourcePrompt) {
 
     const response = await fetch(endpoint, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`
-      },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({
         model: llmSettings.model || "openai/gpt-4o-mini",
         messages: [{ role: "user", content: `Generate only JavaScript code for a ${kind}.\n${sourcePrompt}` }]
@@ -478,66 +702,6 @@ function describeEntitySchedule(entity, atIso) {
   return { active: sched.active, reason: sched.reason };
 }
 
-function persistState() {
-  if (!stateFilePath) {
-    return;
-  }
-  const state = {
-    llmSettings,
-    actions: Array.from(actions.values()),
-    triggers: Array.from(triggers.values()),
-    automationEvents,
-    messageHistory,
-    triggerEvaluations
-  };
-  try {
-    fs.writeFileSync(stateFilePath, JSON.stringify(state, null, 2), "utf8");
-  } catch (_err) {
-    // ignore persistence failures in first-step local scaffold
-  }
-}
-
-function hydrateState() {
-  if (!stateFilePath || !fs.existsSync(stateFilePath)) {
-    return;
-  }
-  try {
-    const parsed = JSON.parse(fs.readFileSync(stateFilePath, "utf8"));
-    if (parsed.llmSettings && typeof parsed.llmSettings === "object") {
-      llmSettings = {
-        provider: parsed.llmSettings.provider || "openai",
-        apiKey: parsed.llmSettings.apiKey || "",
-        model: parsed.llmSettings.model || "gpt-4.1-mini",
-        endpointOverride: parsed.llmSettings.endpointOverride || ""
-      };
-    }
-    if (Array.isArray(parsed.actions)) {
-      parsed.actions.forEach((action) => {
-        actions.set(action.id, action);
-      });
-    }
-    if (Array.isArray(parsed.triggers)) {
-      parsed.triggers.forEach((trigger) => {
-        triggers.set(trigger.id, trigger);
-      });
-    }
-    if (Array.isArray(parsed.automationEvents)) {
-      parsed.automationEvents.forEach((event) => automationEvents.push(event));
-      trimArraySize(automationEvents, MAX_EVENTS);
-    }
-    if (Array.isArray(parsed.messageHistory)) {
-      parsed.messageHistory.forEach((message) => messageHistory.push(message));
-      trimArraySize(messageHistory, MAX_MESSAGES);
-    }
-    if (Array.isArray(parsed.triggerEvaluations)) {
-      parsed.triggerEvaluations.forEach((evaluation) => triggerEvaluations.push(evaluation));
-      trimArraySize(triggerEvaluations, MAX_EVALUATIONS);
-    }
-  } catch (_err) {
-    // ignore malformed state file
-  }
-}
-
 function serializeAction(action) {
   return {
     id: action.id,
@@ -569,6 +733,109 @@ function serializeTrigger(trigger) {
   };
 }
 
+function upsertLlmSettings() {
+  fireAndForgetDb(
+    dbRun(
+      `INSERT INTO llm_settings (id, provider, api_key, model, endpoint_override, updated_at)
+       VALUES (1, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         provider = excluded.provider,
+         api_key = excluded.api_key,
+         model = excluded.model,
+         endpoint_override = excluded.endpoint_override,
+         updated_at = excluded.updated_at`,
+      [llmSettings.provider, llmSettings.apiKey, llmSettings.model, llmSettings.endpointOverride, nowIso()]
+    )
+  );
+}
+
+function upsertAction(action) {
+  fireAndForgetDb(
+    dbRun(
+      `INSERT INTO actions (id, name, kind, instructions, schedule_text, schedule_json, enabled, generated_code, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         name = excluded.name,
+         kind = excluded.kind,
+         instructions = excluded.instructions,
+         schedule_text = excluded.schedule_text,
+         schedule_json = excluded.schedule_json,
+         enabled = excluded.enabled,
+         generated_code = excluded.generated_code,
+         created_at = excluded.created_at,
+         updated_at = excluded.updated_at`,
+      [
+        action.id,
+        action.name,
+        action.kind,
+        action.instructions,
+        action.scheduleText,
+        JSON.stringify(action.schedule),
+        action.enabled ? 1 : 0,
+        action.generatedCode,
+        action.createdAt,
+        action.updatedAt
+      ]
+    )
+  );
+}
+
+function upsertTrigger(trigger) {
+  fireAndForgetDb(
+    dbRun(
+      `INSERT INTO triggers (id, name, source_tab, match_text, schedule_text, schedule_json, action_ids_json, enabled, generated_code, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         name = excluded.name,
+         source_tab = excluded.source_tab,
+         match_text = excluded.match_text,
+         schedule_text = excluded.schedule_text,
+         schedule_json = excluded.schedule_json,
+         action_ids_json = excluded.action_ids_json,
+         enabled = excluded.enabled,
+         generated_code = excluded.generated_code,
+         created_at = excluded.created_at,
+         updated_at = excluded.updated_at`,
+      [
+        trigger.id,
+        trigger.name,
+        trigger.sourceTab,
+        trigger.matchText,
+        trigger.scheduleText,
+        JSON.stringify(trigger.schedule),
+        JSON.stringify(trigger.actionIds),
+        trigger.enabled ? 1 : 0,
+        trigger.generatedCode,
+        trigger.createdAt,
+        trigger.updatedAt
+      ]
+    )
+  );
+}
+
+function insertAppEvent(tabId, eventType, payload) {
+  fireAndForgetDb(
+    dbRun(
+      `INSERT INTO app_events (created_at, tab_id, event_type, payload_json) VALUES (?, ?, ?, ?)`,
+      [nowIso(), tabId, eventType, JSON.stringify(payload || {})]
+    )
+  );
+}
+
+function pushAutomationEvent(event) {
+  const decorated = { ...event, createdAt: nowIso() };
+  automationEvents.unshift(decorated);
+  trimArraySize(automationEvents, MAX_EVENTS);
+  broadcast("automation:event", decorated);
+  fireAndForgetDb(
+    dbRun(`INSERT INTO automation_events (created_at, kind, payload_json) VALUES (?, ?, ?)`, [
+      decorated.createdAt,
+      decorated.kind,
+      JSON.stringify(decorated)
+    ])
+  );
+}
+
 function listActions() {
   return Array.from(actions.values())
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
@@ -592,6 +859,12 @@ function addMessage(tabId, payload) {
   };
   messageHistory.unshift(message);
   trimArraySize(messageHistory, MAX_MESSAGES);
+  fireAndForgetDb(
+    dbRun(
+      `INSERT INTO messages (id, created_at, tab_id, source, title, body, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [message.id, message.createdAt, message.tabId, message.source, message.title, message.body, JSON.stringify(message)]
+    )
+  );
   return message;
 }
 
@@ -634,6 +907,12 @@ function runTriggerPipeline(tabId, payload) {
     };
     triggerEvaluations.unshift(evaluation);
     trimArraySize(triggerEvaluations, MAX_EVALUATIONS);
+    fireAndForgetDb(
+      dbRun(
+        `INSERT INTO trigger_evaluations (id, trigger_id, message_id, matched, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+        [evaluation.id, evaluation.triggerId, evaluation.messageId, evaluation.matched ? 1 : 0, evaluation.reason, evaluation.createdAt]
+      )
+    );
 
     if (!result.matched) {
       continue;
@@ -692,16 +971,12 @@ function runTriggerPipeline(tabId, payload) {
       });
     }
   }
-
-  persistState();
 }
 
 function getTriggerApplicationHistory(triggerId) {
-  const trigger = triggers.get(triggerId);
-  if (!trigger) {
+  if (!triggers.has(triggerId)) {
     return [];
   }
-
   return triggerEvaluations
     .filter((evaluation) => evaluation.triggerId === triggerId)
     .slice(0, 120)
@@ -749,22 +1024,115 @@ function inspectSchedule(atIso) {
   };
 }
 
+async function databaseOverview() {
+  if (!dbReady) {
+    return {
+      ok: false,
+      dbPath,
+      error: dbError || "Database not ready."
+    };
+  }
+
+  const countTables = [
+    "app_events",
+    "messages",
+    "automation_events",
+    "trigger_evaluations",
+    "actions",
+    "triggers",
+    "llm_settings"
+  ];
+
+  const counts = {};
+  for (const table of countTables) {
+    const row = await dbGet(`SELECT COUNT(*) AS count FROM ${table}`);
+    counts[table] = row ? row.count : 0;
+  }
+
+  const recentAppEvents = await dbAll(
+    `SELECT id, created_at, tab_id, event_type, payload_json FROM app_events ORDER BY id DESC LIMIT 20`
+  );
+  const recentMessages = await dbAll(
+    `SELECT id, created_at, tab_id, source, title, body FROM messages ORDER BY created_at DESC LIMIT 20`
+  );
+
+  return {
+    ok: true,
+    dbPath,
+    counts,
+    recentAppEvents: recentAppEvents.map((row) => ({
+      id: row.id,
+      createdAt: row.created_at,
+      tabId: row.tab_id,
+      eventType: row.event_type,
+      payload: JSON.parse(row.payload_json || "{}")
+    })),
+    recentMessages: recentMessages.map((row) => ({
+      id: row.id,
+      createdAt: row.created_at,
+      tabId: row.tab_id,
+      source: row.source,
+      title: row.title,
+      body: row.body
+    }))
+  };
+}
+
+function isReadOnlySql(sql) {
+  const trimmed = sql.trim().toLowerCase();
+  return /^(select|with|pragma|explain)\b/.test(trimmed);
+}
+
+async function runDatabaseQuery(sql) {
+  if (!dbReady) {
+    return { ok: false, error: dbError || "Database not ready." };
+  }
+  if (!sql || !sql.trim()) {
+    return { ok: false, error: "Query is empty." };
+  }
+  if (!isReadOnlySql(sql)) {
+    return { ok: false, error: "Only read-only queries are allowed (SELECT/WITH/PRAGMA/EXPLAIN)." };
+  }
+
+  try {
+    const rows = await dbAll(sql);
+    const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
+    return { ok: true, columns, rows };
+  } catch (error) {
+    return { ok: false, error: error.message || "Failed to execute query." };
+  }
+}
+
 function attachViewObservers(tabId, view) {
   const emitState = () => {
     broadcast("tab:state", buildTabState(tabId));
   };
   const wc = view.webContents;
-  wc.on("did-start-loading", emitState);
-  wc.on("did-stop-loading", emitState);
-  wc.on("did-navigate", emitState);
-  wc.on("did-navigate-in-page", emitState);
-  wc.on("page-title-updated", emitState);
+
+  wc.on("did-start-loading", () => {
+    emitState();
+    insertAppEvent(tabId, "did-start-loading", { url: wc.getURL() });
+  });
+  wc.on("did-stop-loading", () => {
+    emitState();
+    insertAppEvent(tabId, "did-stop-loading", { url: wc.getURL(), title: wc.getTitle() });
+  });
+  wc.on("did-navigate", (_event, url) => {
+    emitState();
+    insertAppEvent(tabId, "did-navigate", { url });
+  });
+  wc.on("did-navigate-in-page", (_event, url) => {
+    emitState();
+    insertAppEvent(tabId, "did-navigate-in-page", { url });
+  });
+  wc.on("page-title-updated", (_event, title) => {
+    emitState();
+    insertAppEvent(tabId, "page-title-updated", { title });
+  });
   wc.on("notification-shown", (_event, notification) => {
-    runTriggerPipeline(tabId, {
-      title: notification.title || "",
-      body: notification.body || "",
-      source: "notification"
-    });
+    const payload = { title: notification.title || "", body: notification.body || "", source: "notification" };
+    insertAppEvent(tabId, "notification-shown", payload);
+    runTriggerPipeline(tabId, payload);
   });
 }
 
@@ -842,7 +1210,7 @@ function wireIpcHandlers() {
       model: payload.model || "",
       endpointOverride: payload.endpointOverride || ""
     };
-    persistState();
+    upsertLlmSettings();
     return { ok: true };
   });
 
@@ -862,7 +1230,7 @@ function wireIpcHandlers() {
     };
     action.generatedCode = await generateActionCode(action, Boolean(payload.useLlmGeneration));
     actions.set(action.id, action);
-    persistState();
+    upsertAction(action);
     return { ok: true, action: serializeAction(action) };
   });
   ipcMain.handle("automation:set-action-enabled", (_event, payload) => {
@@ -873,7 +1241,7 @@ function wireIpcHandlers() {
     action.enabled = Boolean(payload.enabled);
     action.updatedAt = nowIso();
     actions.set(action.id, action);
-    persistState();
+    upsertAction(action);
     return { ok: true };
   });
 
@@ -894,7 +1262,7 @@ function wireIpcHandlers() {
     };
     trigger.generatedCode = await generateTriggerCode(trigger, Boolean(payload.useLlmGeneration));
     triggers.set(trigger.id, trigger);
-    persistState();
+    upsertTrigger(trigger);
     return { ok: true, trigger: serializeTrigger(trigger) };
   });
   ipcMain.handle("automation:set-trigger-enabled", (_event, payload) => {
@@ -905,11 +1273,12 @@ function wireIpcHandlers() {
     trigger.enabled = Boolean(payload.enabled);
     trigger.updatedAt = nowIso();
     triggers.set(trigger.id, trigger);
-    persistState();
+    upsertTrigger(trigger);
     return { ok: true };
   });
 
   ipcMain.handle("automation:simulate-message", (_event, payload) => {
+    insertAppEvent(payload.tabId || "unknown", "simulated-message", { title: payload.title || "", body: payload.body || "" });
     runTriggerPipeline(payload.tabId || "unknown", {
       title: payload.title || "Simulated message",
       body: payload.body || "",
@@ -921,8 +1290,15 @@ function wireIpcHandlers() {
 
   ipcMain.handle("automation:recent-events", () => automationEvents.slice(0, 200));
   ipcMain.handle("automation:list-messages", () => messageHistory.slice(0, 200));
-  ipcMain.handle("automation:trigger-history", (_event, payload) => getTriggerApplicationHistory(payload.triggerId));
-  ipcMain.handle("automation:inspect-schedule", (_event, payload) => inspectSchedule(payload.atIso));
+  ipcMain.handle("automation:trigger-history", (_event, payload) =>
+    getTriggerApplicationHistory((payload && payload.triggerId) || "")
+  );
+  ipcMain.handle("automation:inspect-schedule", (_event, payload) =>
+    inspectSchedule((payload && payload.atIso) || nowIso())
+  );
+
+  ipcMain.handle("database:overview", async () => databaseOverview());
+  ipcMain.handle("database:query", async (_event, payload) => runDatabaseQuery((payload && payload.sql) || ""));
 }
 
 function createMainWindow() {
@@ -951,9 +1327,15 @@ function createMainWindow() {
   switchToTab(activeTabId);
 }
 
-app.whenReady().then(() => {
-  stateFilePath = path.join(app.getPath("userData"), "automation-state.json");
-  hydrateState();
+app.whenReady().then(async () => {
+  try {
+    await initDatabase();
+    await loadStateFromDb();
+  } catch (error) {
+    dbReady = false;
+    dbError = error.message || "Database initialization failed.";
+  }
+
   wireIpcHandlers();
   createMainWindow();
 });

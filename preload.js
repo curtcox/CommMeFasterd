@@ -23,5 +23,9 @@ contextBridge.exposeInMainWorld("commMeFasterd", {
     getTriggerHistory: (payload) => ipcRenderer.invoke("automation:trigger-history", payload),
     inspectSchedule: (payload) => ipcRenderer.invoke("automation:inspect-schedule", payload),
     onEvent: (handler) => ipcRenderer.on("automation:event", (_event, payload) => handler(payload))
+  },
+  database: {
+    getOverview: () => ipcRenderer.invoke("database:overview"),
+    query: (payload) => ipcRenderer.invoke("database:query", payload)
   }
 });

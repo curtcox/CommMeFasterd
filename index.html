@@ -160,6 +160,39 @@
       </section>
     </main>
 
+    <main id="database-panel" class="settings hidden">
+      <section class="settings-card">
+        <h2>Database Overview</h2>
+        <p>SQLite file used for app events, messages, triggers, actions, schedules, and settings.</p>
+        <div><strong>Path:</strong> <code id="db-path">(loading)</code></div>
+        <button id="db-refresh" type="button">Refresh Overview</button>
+        <ul id="db-counts-list"></ul>
+      </section>
+
+      <section class="settings-card">
+        <h2>Read-Only SQL Query</h2>
+        <p>Allowed statements: <code>SELECT</code>, <code>WITH</code>, <code>PRAGMA</code>, <code>EXPLAIN</code>.</p>
+        <form id="db-query-form">
+          <label>
+            SQL
+            <textarea id="db-sql" rows="6" placeholder="SELECT * FROM messages ORDER BY created_at DESC LIMIT 20;"></textarea>
+          </label>
+          <button type="submit">Run Query</button>
+        </form>
+        <pre id="db-query-result" class="code-block"></pre>
+      </section>
+
+      <section class="settings-card">
+        <h2>Recent App Events</h2>
+        <ul id="db-recent-events"></ul>
+      </section>
+
+      <section class="settings-card">
+        <h2>Recent Messages</h2>
+        <ul id="db-recent-messages"></ul>
+      </section>
+    </main>
+
     <script src="./renderer.js"></script>
   </body>
 </html>

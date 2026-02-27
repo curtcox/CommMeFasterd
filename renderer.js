@@ -3,6 +3,7 @@ const appApi = window.commMeFasterd;
 const el = {
   tabs: document.getElementById("tabs"),
   settingsPanel: document.getElementById("settings-panel"),
+  databasePanel: document.getElementById("database-panel"),
   activeViewState: document.getElementById("active-view-state"),
 
   llmForm: document.getElementById("llm-form"),
@@ -40,7 +41,16 @@ const el = {
   scheduleInspectAt: document.getElementById("schedule-inspect-at"),
   scheduleInspectionList: document.getElementById("schedule-inspection-list"),
 
-  eventsList: document.getElementById("events-list")
+  eventsList: document.getElementById("events-list"),
+
+  dbPath: document.getElementById("db-path"),
+  dbRefresh: document.getElementById("db-refresh"),
+  dbCountsList: document.getElementById("db-counts-list"),
+  dbRecentEvents: document.getElementById("db-recent-events"),
+  dbRecentMessages: document.getElementById("db-recent-messages"),
+  dbQueryForm: document.getElementById("db-query-form"),
+  dbSql: document.getElementById("db-sql"),
+  dbQueryResult: document.getElementById("db-query-result")
 };
 
 let currentActiveTab = "";
@@ -84,7 +94,7 @@ async function renderTabStrip() {
     el.simulateTab,
     data.tabs.filter((tab) => tab.type === "web").map((tab) => ({ id: tab.id, label: tab.label }))
   );
-  updateSettingsVisibility();
+  updateLocalPanelsVisibility();
 }
 
 function populateSelect(select, values) {
@@ -97,14 +107,14 @@ function populateSelect(select, values) {
   });
 }
 
-function updateSettingsVisibility() {
-  const isSettings = currentActiveTab === "settings";
-  el.settingsPanel.classList.toggle("hidden", !isSettings);
+function updateLocalPanelsVisibility() {
+  el.settingsPanel.classList.toggle("hidden", currentActiveTab !== "settings");
+  el.databasePanel.classList.toggle("hidden", currentActiveTab !== "database");
 }
 
 function renderActiveState(state) {
-  if (!state || currentActiveTab === "settings") {
-    el.activeViewState.textContent = "Settings tab is local.";
+  if (!state || currentActiveTab === "settings" || currentActiveTab === "database") {
+    el.activeViewState.textContent = `${currentActiveTab || "local"} tab is local.`;
     return;
   }
   el.activeViewState.textContent = [
@@ -404,6 +414,57 @@ async function renderScheduleInspection() {
   });
 }
 
+async function renderDbOverview() {
+  const data = await appApi.database.getOverview();
+  el.dbCountsList.innerHTML = "";
+  el.dbRecentEvents.innerHTML = "";
+  el.dbRecentMessages.innerHTML = "";
+
+  if (!data.ok) {
+    el.dbPath.textContent = data.dbPath || "(unavailable)";
+    const err = document.createElement("li");
+    err.textContent = data.error || "Database not ready.";
+    el.dbCountsList.appendChild(err);
+    return;
+  }
+
+  el.dbPath.textContent = data.dbPath;
+  Object.entries(data.counts).forEach(([table, count]) => {
+    const item = document.createElement("li");
+    item.textContent = `${table}: ${count}`;
+    el.dbCountsList.appendChild(item);
+  });
+
+  data.recentAppEvents.forEach((evt) => {
+    const item = document.createElement("li");
+    item.className = "entity-item";
+    item.textContent = `[${evt.createdAt}] ${evt.tabId} ${evt.eventType} ${JSON.stringify(evt.payload)}`;
+    el.dbRecentEvents.appendChild(item);
+  });
+
+  data.recentMessages.forEach((msg) => {
+    const item = document.createElement("li");
+    item.className = "entity-item";
+    item.textContent = `[${msg.createdAt}] ${msg.tabId} ${msg.source} | ${msg.title} | ${msg.body}`;
+    el.dbRecentMessages.appendChild(item);
+  });
+}
+
+async function runDbQuery() {
+  const sql = el.dbSql.value.trim();
+  const result = await appApi.database.query({ sql });
+  if (!result.ok) {
+    el.dbQueryResult.textContent = `Error: ${result.error}`;
+    return;
+  }
+  const output = {
+    rowCount: result.rows.length,
+    columns: result.columns,
+    rows: result.rows
+  };
+  el.dbQueryResult.textContent = JSON.stringify(output, null, 2);
+}
+
 async function initializeForms() {
   el.llmForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -431,6 +492,9 @@ async function initializeForms() {
     await renderActions();
     await renderTriggers();
     await renderScheduleInspection();
+    if (currentActiveTab === "database") {
+      await renderDbOverview();
+    }
   });
 
   el.triggerForm.addEventListener("submit", async (event) => {
@@ -451,6 +515,9 @@ async function initializeForms() {
     await renderTriggers();
     await renderScheduleInspection();
     await renderTriggerHistory();
+    if (currentActiveTab === "database") {
+      await renderDbOverview();
+    }
   });
 
   el.simulateForm.addEventListener("submit", async (event) => {
@@ -463,6 +530,9 @@ async function initializeForms() {
     el.simulateTitle.value = "";
     el.simulateBody.value = "";
     await renderTriggerHistory();
+    if (currentActiveTab === "database") {
+      await renderDbOverview();
+    }
   });
 
   el.historyTriggerSelect.addEventListener("change", async () => {
@@ -473,6 +543,15 @@ async function initializeForms() {
     event.preventDefault();
     await renderScheduleInspection();
   });
+
+  el.dbRefresh.addEventListener("click", async () => {
+    await renderDbOverview();
+  });
+
+  el.dbQueryForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await runDbQuery();
+  });
 }
 
 function registerRealtimeListeners() {
@@ -480,6 +559,9 @@ function registerRealtimeListeners() {
     currentActiveTab = tabId;
     await renderTabStrip();
     renderActiveState(await appApi.tabs.getActiveState());
+    if (tabId === "database") {
+      await renderDbOverview();
+    }
   });
 
   appApi.tabs.onStateChange((state) => {
@@ -503,6 +585,7 @@ async function bootstrap() {
   await renderTriggers();
   await renderTriggerHistory();
   await renderScheduleInspection();
+  await renderDbOverview();
   renderEvents(await appApi.automation.getRecentEvents());
   renderActiveState(await appApi.tabs.getActiveState());
 }
