@@ -20,6 +20,8 @@ Minimal first step for a Mac Electron multi-app communication shell.
 - Database tab:
   - inspect database path and table counts
   - inspect recent app events and recent messages
+  - inspect recent web console logs, HTTP traffic, and screenshot history
+  - capture on-demand screenshots from wrapped app tabs
   - run read-only SQL queries (`SELECT`, `WITH`, `PRAGMA`, `EXPLAIN`)
 - Basic active-tab introspection (`title`, `url`, loading, navigation state).
 
@@ -41,3 +43,7 @@ npm start
    - trigger history shows whether the trigger matched that message
 8. Use schedule inspector with a past and future timestamp.
 9. Open the `Database` tab and verify counts and recent events/messages update.
+10. In `Database`, verify:
+   - web console logs appear
+   - HTTP traffic appears
+   - screenshot capture works and stores metadata/history

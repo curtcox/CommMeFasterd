@@ -246,6 +246,16 @@ ul {
   white-space: pre;
 }
 
+.screenshot-preview {
+  margin-top: 8px;
+  width: 100%;
+  max-height: 280px;
+  object-fit: contain;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+}
+
 .event-item {
   margin-bottom: 4px;
   font-size: 11px;

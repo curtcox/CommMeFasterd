@@ -183,6 +183,19 @@
       </section>
 
       <section class="settings-card">
+        <h2>Screenshot Capture</h2>
+        <form id="diag-screenshot-form">
+          <label>
+            Tab
+            <select id="diag-screenshot-tab"></select>
+          </label>
+          <button type="submit">Capture Screenshot</button>
+        </form>
+        <div class="meta" id="diag-screenshot-meta">No screenshot captured this session.</div>
+        <img id="diag-screenshot-preview" class="screenshot-preview hidden" alt="Latest screenshot preview" />
+      </section>
+
+      <section class="settings-card">
         <h2>Recent App Events</h2>
         <ul id="db-recent-events"></ul>
       </section>
@@ -190,6 +203,21 @@
       <section class="settings-card">
         <h2>Recent Messages</h2>
         <ul id="db-recent-messages"></ul>
+      </section>
+
+      <section class="settings-card">
+        <h2>Recent Web Console Logs</h2>
+        <ul id="db-console-logs"></ul>
+      </section>
+
+      <section class="settings-card">
+        <h2>Recent HTTP Traffic</h2>
+        <ul id="db-http-traffic"></ul>
+      </section>
+
+      <section class="settings-card">
+        <h2>Recent Screenshots</h2>
+        <ul id="db-screenshots"></ul>
       </section>
     </main>
 

@@ -24,6 +24,12 @@ contextBridge.exposeInMainWorld("commMeFasterd", {
     inspectSchedule: (payload) => ipcRenderer.invoke("automation:inspect-schedule", payload),
     onEvent: (handler) => ipcRenderer.on("automation:event", (_event, payload) => handler(payload))
   },
+  diagnostics: {
+    listConsoleLogs: (payload) => ipcRenderer.invoke("diagnostics:list-console", payload),
+    listHttpTraffic: (payload) => ipcRenderer.invoke("diagnostics:list-http", payload),
+    listScreenshots: (payload) => ipcRenderer.invoke("diagnostics:list-screenshots", payload),
+    captureScreenshot: (payload) => ipcRenderer.invoke("diagnostics:capture-screenshot", payload)
+  },
   database: {
     getOverview: () => ipcRenderer.invoke("database:overview"),
     query: (payload) => ipcRenderer.invoke("database:query", payload)

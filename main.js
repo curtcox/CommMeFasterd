@@ -1,3 +1,4 @@
+const fs = require("fs");
 const path = require("path");
 const { app, BrowserWindow, BrowserView, ipcMain } = require("electron");
 
@@ -12,6 +13,9 @@ const TAB_BAR_HEIGHT = 100;
 const MAX_EVENTS = 400;
 const MAX_MESSAGES = 400;
 const MAX_EVALUATIONS = 1200;
+const MAX_CONSOLE_LOGS = 800;
+const MAX_HTTP_TRAFFIC = 1200;
+const MAX_SCREENSHOTS = 200;
 
 const TABS = [
   { id: "slack", label: "Slack", url: "https://app.slack.com/client", type: "web" },
@@ -37,7 +41,13 @@ const DAY_TO_INDEX = {
 let mainWindow = null;
 /** @type {Map<string, BrowserView>} */
 const tabViews = new Map();
+/** @type {Map<number, string>} */
+const webContentsToTabId = new Map();
+/** @type {Map<number, any>} */
+const pendingNetworkRequests = new Map();
 let activeTabId = "slack";
+let screenshotsDir = "";
+let networkObserversInstalled = false;
 
 /** @type {import("sqlite3").Database | null} */
 let db = null;
@@ -48,6 +58,9 @@ let dbError = "";
 const automationEvents = [];
 const messageHistory = [];
 const triggerEvaluations = [];
+const consoleLogs = [];
+const httpTraffic = [];
+const screenshotHistory = [];
 /** @type {Map<string, any>} */
 const actions = new Map();
 /** @type {Map<string, any>} */
@@ -241,6 +254,40 @@ async function initDatabase() {
     payload_json TEXT NOT NULL
   )`);
 
+  await dbRun(`CREATE TABLE IF NOT EXISTS console_logs (
+    id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    tab_id TEXT NOT NULL,
+    level INTEGER NOT NULL,
+    message TEXT NOT NULL,
+    source_id TEXT,
+    line INTEGER
+  )`);
+
+  await dbRun(`CREATE TABLE IF NOT EXISTS http_traffic (
+    id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    tab_id TEXT NOT NULL,
+    method TEXT NOT NULL,
+    url TEXT NOT NULL,
+    resource_type TEXT NOT NULL,
+    status_code INTEGER,
+    status_line TEXT,
+    from_cache INTEGER NOT NULL,
+    ip TEXT,
+    duration_ms INTEGER,
+    error TEXT
+  )`);
+
+  await dbRun(`CREATE TABLE IF NOT EXISTS screenshots (
+    id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    tab_id TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    width INTEGER NOT NULL,
+    height INTEGER NOT NULL
+  )`);
+
   dbReady = true;
   dbError = "";
 }
@@ -326,6 +373,58 @@ async function loadStateFromDb() {
       createdAt: row.created_at,
       kind: row.kind,
       ...payload
+    });
+  });
+
+  const consoleRows = await dbAll(
+    "SELECT id, created_at, tab_id, level, message, source_id, line FROM console_logs ORDER BY created_at DESC LIMIT ?",
+    [MAX_CONSOLE_LOGS]
+  );
+  consoleRows.forEach((row) => {
+    consoleLogs.push({
+      id: row.id,
+      createdAt: row.created_at,
+      tabId: row.tab_id,
+      level: row.level,
+      message: row.message,
+      sourceId: row.source_id || "",
+      line: row.line || 0
+    });
+  });
+
+  const httpRows = await dbAll(
+    "SELECT id, created_at, tab_id, method, url, resource_type, status_code, status_line, from_cache, ip, duration_ms, error FROM http_traffic ORDER BY created_at DESC LIMIT ?",
+    [MAX_HTTP_TRAFFIC]
+  );
+  httpRows.forEach((row) => {
+    httpTraffic.push({
+      id: row.id,
+      createdAt: row.created_at,
+      tabId: row.tab_id,
+      method: row.method,
+      url: row.url,
+      resourceType: row.resource_type,
+      statusCode: row.status_code || 0,
+      statusLine: row.status_line || "",
+      fromCache: Boolean(row.from_cache),
+      ip: row.ip || "",
+      durationMs: row.duration_ms || null,
+      error: row.error || ""
+    });
+  });
+
+  const screenshotRows = await dbAll(
+    "SELECT id, created_at, tab_id, file_path, width, height FROM screenshots ORDER BY created_at DESC LIMIT ?",
+    [MAX_SCREENSHOTS]
+  );
+  screenshotRows.forEach((row) => {
+    screenshotHistory.push({
+      id: row.id,
+      createdAt: row.created_at,
+      tabId: row.tab_id,
+      filePath: row.file_path,
+      width: row.width,
+      height: row.height
     });
   });
 }
@@ -822,6 +921,127 @@ function insertAppEvent(tabId, eventType, payload) {
   );
 }
 
+function pushConsoleLog(entry) {
+  consoleLogs.unshift(entry);
+  trimArraySize(consoleLogs, MAX_CONSOLE_LOGS);
+  fireAndForgetDb(
+    dbRun(
+      `INSERT INTO console_logs (id, created_at, tab_id, level, message, source_id, line)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [entry.id, entry.createdAt, entry.tabId, entry.level, entry.message, entry.sourceId || "", entry.line || 0]
+    )
+  );
+}
+
+function pushHttpTraffic(entry) {
+  httpTraffic.unshift(entry);
+  trimArraySize(httpTraffic, MAX_HTTP_TRAFFIC);
+  fireAndForgetDb(
+    dbRun(
+      `INSERT INTO http_traffic (id, created_at, tab_id, method, url, resource_type, status_code, status_line, from_cache, ip, duration_ms, error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        entry.id,
+        entry.createdAt,
+        entry.tabId,
+        entry.method || "",
+        entry.url || "",
+        entry.resourceType || "unknown",
+        entry.statusCode || 0,
+        entry.statusLine || "",
+        entry.fromCache ? 1 : 0,
+        entry.ip || "",
+        Number.isFinite(entry.durationMs) ? entry.durationMs : null,
+        entry.error || ""
+      ]
+    )
+  );
+}
+
+function pushScreenshotMeta(entry) {
+  screenshotHistory.unshift(entry);
+  trimArraySize(screenshotHistory, MAX_SCREENSHOTS);
+  fireAndForgetDb(
+    dbRun(
+      `INSERT INTO screenshots (id, created_at, tab_id, file_path, width, height) VALUES (?, ?, ?, ?, ?, ?)`,
+      [entry.id, entry.createdAt, entry.tabId, entry.filePath, entry.width, entry.height]
+    )
+  );
+}
+
+function installNetworkObserversForSession(sess) {
+  if (!sess || networkObserversInstalled) {
+    return;
+  }
+  networkObserversInstalled = true;
+
+  sess.webRequest.onBeforeRequest((details, callback) => {
+    pendingNetworkRequests.set(details.id, {
+      startedAtMs: Date.now(),
+      tabId: webContentsToTabId.get(details.webContentsId) || "unknown",
+      method: details.method || "",
+      resourceType: details.resourceType || "unknown"
+    });
+    callback({});
+  });
+
+  sess.webRequest.onCompleted((details) => {
+    const start = pendingNetworkRequests.get(details.id);
+    pendingNetworkRequests.delete(details.id);
+    pushHttpTraffic({
+      id: newId("http"),
+      createdAt: nowIso(),
+      tabId: webContentsToTabId.get(details.webContentsId) || (start && start.tabId) || "unknown",
+      method: details.method || (start && start.method) || "",
+      url: details.url || "",
+      resourceType: details.resourceType || (start && start.resourceType) || "unknown",
+      statusCode: details.statusCode || 0,
+      statusLine: details.statusLine || "",
+      fromCache: Boolean(details.fromCache),
+      ip: details.ip || "",
+      durationMs: start ? Math.max(0, Date.now() - start.startedAtMs) : null,
+      error: ""
+    });
+  });
+
+  sess.webRequest.onErrorOccurred((details) => {
+    const start = pendingNetworkRequests.get(details.id);
+    pendingNetworkRequests.delete(details.id);
+    pushHttpTraffic({
+      id: newId("http"),
+      createdAt: nowIso(),
+      tabId: webContentsToTabId.get(details.webContentsId) || (start && start.tabId) || "unknown",
+      method: details.method || (start && start.method) || "",
+      url: details.url || "",
+      resourceType: details.resourceType || (start && start.resourceType) || "unknown",
+      statusCode: 0,
+      statusLine: "",
+      fromCache: false,
+      ip: "",
+      durationMs: start ? Math.max(0, Date.now() - start.startedAtMs) : null,
+      error: details.error || "unknown"
+    });
+  });
+}
+
+function listConsoleLogs(tabId, limit) {
+  const max = Math.max(1, Math.min(1000, Number(limit) || 200));
+  const rows = tabId ? consoleLogs.filter((item) => item.tabId === tabId) : consoleLogs;
+  return rows.slice(0, max);
+}
+
+function listHttpTraffic(tabId, limit) {
+  const max = Math.max(1, Math.min(1000, Number(limit) || 400));
+  const rows = tabId ? httpTraffic.filter((item) => item.tabId === tabId) : httpTraffic;
+  return rows.slice(0, max);
+}
+
+function listScreenshots(tabId, limit) {
+  const max = Math.max(1, Math.min(200, Number(limit) || 50));
+  const rows = tabId ? screenshotHistory.filter((item) => item.tabId === tabId) : screenshotHistory;
+  return rows.slice(0, max);
+}
+
 function pushAutomationEvent(event) {
   const decorated = { ...event, createdAt: nowIso() };
   automationEvents.unshift(decorated);
@@ -1040,7 +1260,10 @@ async function databaseOverview() {
     "trigger_evaluations",
     "actions",
     "triggers",
-    "llm_settings"
+    "llm_settings",
+    "console_logs",
+    "http_traffic",
+    "screenshots"
   ];
 
   const counts = {};
@@ -1054,6 +1277,15 @@ async function databaseOverview() {
   );
   const recentMessages = await dbAll(
     `SELECT id, created_at, tab_id, source, title, body FROM messages ORDER BY created_at DESC LIMIT 20`
+  );
+  const recentConsoleLogs = await dbAll(
+    `SELECT id, created_at, tab_id, level, message, source_id, line FROM console_logs ORDER BY created_at DESC LIMIT 40`
+  );
+  const recentHttpTraffic = await dbAll(
+    `SELECT id, created_at, tab_id, method, url, resource_type, status_code, from_cache, duration_ms, error FROM http_traffic ORDER BY created_at DESC LIMIT 40`
+  );
+  const recentScreenshots = await dbAll(
+    `SELECT id, created_at, tab_id, file_path, width, height FROM screenshots ORDER BY created_at DESC LIMIT 20`
   );
 
   return {
@@ -1074,6 +1306,35 @@ async function databaseOverview() {
       source: row.source,
       title: row.title,
       body: row.body
+    })),
+    recentConsoleLogs: recentConsoleLogs.map((row) => ({
+      id: row.id,
+      createdAt: row.created_at,
+      tabId: row.tab_id,
+      level: row.level,
+      message: row.message,
+      sourceId: row.source_id || "",
+      line: row.line || 0
+    })),
+    recentHttpTraffic: recentHttpTraffic.map((row) => ({
+      id: row.id,
+      createdAt: row.created_at,
+      tabId: row.tab_id,
+      method: row.method,
+      url: row.url,
+      resourceType: row.resource_type,
+      statusCode: row.status_code || 0,
+      fromCache: Boolean(row.from_cache),
+      durationMs: row.duration_ms || null,
+      error: row.error || ""
+    })),
+    recentScreenshots: recentScreenshots.map((row) => ({
+      id: row.id,
+      createdAt: row.created_at,
+      tabId: row.tab_id,
+      filePath: row.file_path,
+      width: row.width,
+      height: row.height
     }))
   };
 }
@@ -1103,6 +1364,46 @@ async function runDatabaseQuery(sql) {
   }
 }
 
+async function captureScreenshotForTab(requestedTabId) {
+  const tabId = requestedTabId || activeTabId;
+  const selectedTab = TABS.find((tab) => tab.id === tabId);
+  if (!selectedTab || selectedTab.type !== "web") {
+    return { ok: false, error: "Screenshot requires a web tab (Slack/Teams/Office/Gmail/Calendar)." };
+  }
+  const view = tabViews.get(tabId);
+  if (!view) {
+    return { ok: false, error: `Tab "${tabId}" is not available.` };
+  }
+
+  try {
+    const image = await view.webContents.capturePage();
+    const buffer = image.toPNG();
+    const size = image.getSize();
+    const createdAt = nowIso();
+    const fileName = `${tabId}-${createdAt.replace(/[:.]/g, "-")}.png`;
+    const filePath = path.join(screenshotsDir, fileName);
+    fs.writeFileSync(filePath, buffer);
+
+    const meta = {
+      id: newId("shot"),
+      createdAt,
+      tabId,
+      filePath,
+      width: size.width,
+      height: size.height
+    };
+    pushScreenshotMeta(meta);
+
+    return {
+      ok: true,
+      screenshot: meta,
+      dataUrl: `data:image/png;base64,${buffer.toString("base64")}`
+    };
+  } catch (error) {
+    return { ok: false, error: error.message || "Failed to capture screenshot." };
+  }
+}
+
 function attachViewObservers(tabId, view) {
   const emitState = () => {
     broadcast("tab:state", buildTabState(tabId));
@@ -1129,6 +1430,17 @@ function attachViewObservers(tabId, view) {
     emitState();
     insertAppEvent(tabId, "page-title-updated", { title });
   });
+  wc.on("console-message", (_event, level, message, line, sourceId) => {
+    pushConsoleLog({
+      id: newId("console"),
+      createdAt: nowIso(),
+      tabId,
+      level,
+      message: message || "",
+      sourceId: sourceId || "",
+      line: line || 0
+    });
+  });
   wc.on("notification-shown", (_event, notification) => {
     const payload = { title: notification.title || "", body: notification.body || "", source: "notification" };
     insertAppEvent(tabId, "notification-shown", payload);
@@ -1145,6 +1457,12 @@ function createWebTabView(tab) {
     }
   });
   tabViews.set(tab.id, view);
+  const wcId = view.webContents.id;
+  webContentsToTabId.set(wcId, tab.id);
+  installNetworkObserversForSession(view.webContents.session);
+  view.webContents.on("destroyed", () => {
+    webContentsToTabId.delete(wcId);
+  });
   attachViewObservers(tab.id, view);
   view.webContents.loadURL(tab.url);
 }
@@ -1297,6 +1615,19 @@ function wireIpcHandlers() {
     inspectSchedule((payload && payload.atIso) || nowIso())
   );
 
+  ipcMain.handle("diagnostics:list-console", (_event, payload) =>
+    listConsoleLogs((payload && payload.tabId) || "", (payload && payload.limit) || 200)
+  );
+  ipcMain.handle("diagnostics:list-http", (_event, payload) =>
+    listHttpTraffic((payload && payload.tabId) || "", (payload && payload.limit) || 400)
+  );
+  ipcMain.handle("diagnostics:list-screenshots", (_event, payload) =>
+    listScreenshots((payload && payload.tabId) || "", (payload && payload.limit) || 50)
+  );
+  ipcMain.handle("diagnostics:capture-screenshot", async (_event, payload) =>
+    captureScreenshotForTab((payload && payload.tabId) || "")
+  );
+
   ipcMain.handle("database:overview", async () => databaseOverview());
   ipcMain.handle("database:query", async (_event, payload) => runDatabaseQuery((payload && payload.sql) || ""));
 }
@@ -1329,6 +1660,8 @@ function createMainWindow() {
 
 app.whenReady().then(async () => {
   try {
+    screenshotsDir = path.join(app.getPath("userData"), "screenshots");
+    fs.mkdirSync(screenshotsDir, { recursive: true });
     await initDatabase();
     await loadStateFromDb();
   } catch (error) {

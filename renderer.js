@@ -50,7 +50,15 @@ const el = {
   dbRecentMessages: document.getElementById("db-recent-messages"),
   dbQueryForm: document.getElementById("db-query-form"),
   dbSql: document.getElementById("db-sql"),
-  dbQueryResult: document.getElementById("db-query-result")
+  dbQueryResult: document.getElementById("db-query-result"),
+  dbConsoleLogs: document.getElementById("db-console-logs"),
+  dbHttpTraffic: document.getElementById("db-http-traffic"),
+  dbScreenshots: document.getElementById("db-screenshots"),
+
+  diagScreenshotForm: document.getElementById("diag-screenshot-form"),
+  diagScreenshotTab: document.getElementById("diag-screenshot-tab"),
+  diagScreenshotMeta: document.getElementById("diag-screenshot-meta"),
+  diagScreenshotPreview: document.getElementById("diag-screenshot-preview")
 };
 
 let currentActiveTab = "";
@@ -93,6 +101,12 @@ async function renderTabStrip() {
   populateSelect(
     el.simulateTab,
     data.tabs.filter((tab) => tab.type === "web").map((tab) => ({ id: tab.id, label: tab.label }))
+  );
+  populateSelect(
+    el.diagScreenshotTab,
+    [{ id: "__active__", label: "Active web tab" }].concat(
+      data.tabs.filter((tab) => tab.type === "web").map((tab) => ({ id: tab.id, label: tab.label }))
+    )
   );
   updateLocalPanelsVisibility();
 }
@@ -419,6 +433,9 @@ async function renderDbOverview() {
   el.dbCountsList.innerHTML = "";
   el.dbRecentEvents.innerHTML = "";
   el.dbRecentMessages.innerHTML = "";
+  el.dbConsoleLogs.innerHTML = "";
+  el.dbHttpTraffic.innerHTML = "";
+  el.dbScreenshots.innerHTML = "";
 
   if (!data.ok) {
     el.dbPath.textContent = data.dbPath || "(unavailable)";
@@ -448,6 +465,27 @@ async function renderDbOverview() {
     item.textContent = `[${msg.createdAt}] ${msg.tabId} ${msg.source} | ${msg.title} | ${msg.body}`;
     el.dbRecentMessages.appendChild(item);
   });
+
+  (data.recentConsoleLogs || []).forEach((log) => {
+    const item = document.createElement("li");
+    item.className = "entity-item";
+    item.textContent = `[${log.createdAt}] ${log.tabId} lvl=${log.level} ${log.message} (${log.sourceId}:${log.line})`;
+    el.dbConsoleLogs.appendChild(item);
+  });
+
+  (data.recentHttpTraffic || []).forEach((req) => {
+    const item = document.createElement("li");
+    item.className = "entity-item";
+    item.textContent = `[${req.createdAt}] ${req.tabId} ${req.method} ${req.statusCode} ${req.resourceType} ${req.url}${req.error ? ` error=${req.error}` : ""}`;
+    el.dbHttpTraffic.appendChild(item);
+  });
+
+  (data.recentScreenshots || []).forEach((shot) => {
+    const item = document.createElement("li");
+    item.className = "entity-item";
+    item.textContent = `[${shot.createdAt}] ${shot.tabId} ${shot.width}x${shot.height} ${shot.filePath}`;
+    el.dbScreenshots.appendChild(item);
+  });
 }
 
 async function runDbQuery() {
@@ -463,6 +501,22 @@ async function runDbQuery() {
     rows: result.rows
   };
   el.dbQueryResult.textContent = JSON.stringify(output, null, 2);
+}
+
+async function captureDiagnosticScreenshot() {
+  const selected = el.diagScreenshotTab.value;
+  const payload = selected === "__active__" ? {} : { tabId: selected };
+  const result = await appApi.diagnostics.captureScreenshot(payload);
+  if (!result.ok) {
+    el.diagScreenshotMeta.textContent = `Error: ${result.error}`;
+    el.diagScreenshotPreview.classList.add("hidden");
+    el.diagScreenshotPreview.removeAttribute("src");
+    return;
+  }
+
+  el.diagScreenshotMeta.textContent = `[${result.screenshot.createdAt}] ${result.screenshot.tabId} ${result.screenshot.width}x${result.screenshot.height} ${result.screenshot.filePath}`;
+  el.diagScreenshotPreview.src = result.dataUrl;
+  el.diagScreenshotPreview.classList.remove("hidden");
 }
 
 async function initializeForms() {
@@ -551,6 +605,12 @@ async function initializeForms() {
   el.dbQueryForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     await runDbQuery();
+  });
+
+  el.diagScreenshotForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await captureDiagnosticScreenshot();
+    await renderDbOverview();
   });
 }
 
