@@ -1,0 +1,21 @@
+{
+  "name": "comm-me-fasterd",
+  "version": "0.1.0",
+  "description": "Mac Electron shell for communication apps with automation hooks.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "check": "node --check main.js && node --check preload.js && node --check renderer.js"
+  },
+  "keywords": [
+    "electron",
+    "slack",
+    "teams",
+    "gmail"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^33.2.0"
+  }
+}

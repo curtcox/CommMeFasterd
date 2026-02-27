@@ -1,0 +1,161 @@
+:root {
+  color-scheme: light;
+  font-family: "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+  --surface: #f4f6fb;
+  --surface-strong: #ffffff;
+  --border: #ccd4e0;
+  --ink: #162032;
+  --ink-muted: #52607a;
+  --accent: #0d66d0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+body {
+  min-height: 100vh;
+}
+
+.top-shell {
+  height: 100px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(135deg, #f7f9fd, #ebf1fb);
+}
+
+.title-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.title-row h1 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+}
+
+.tab-button {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 8px 12px;
+  background: var(--surface-strong);
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+
+.tab-button.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+.introspection-inline {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 11px;
+  color: var(--ink-muted);
+  min-height: 28px;
+}
+
+.introspection-inline pre {
+  margin: 0;
+  white-space: nowrap;
+  word-break: break-word;
+  font-size: 11px;
+  color: var(--ink-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 85vw;
+}
+
+.settings {
+  padding: 108px 12px 16px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 10px;
+}
+
+.hidden {
+  display: none;
+}
+
+.settings-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  background: var(--surface-strong);
+}
+
+.settings-card h2 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.settings-card p {
+  margin: 0 0 12px;
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+select,
+input,
+button {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  height: 34px;
+  padding: 0 10px;
+  font: inherit;
+}
+
+button {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+  cursor: pointer;
+}
+
+ul {
+  margin: 12px 0 0;
+  padding-left: 18px;
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}

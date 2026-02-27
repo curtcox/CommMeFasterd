@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CommMeFasterd</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="top-shell">
+      <div class="title-row">
+        <h1>CommMeFasterd</h1>
+        <nav id="tabs" class="tabs" aria-label="App tabs"></nav>
+      </div>
+      <div class="introspection-inline">
+        <strong>Active tab state:</strong>
+        <pre id="active-view-state"></pre>
+      </div>
+    </header>
+
+    <main id="settings-panel" class="settings hidden">
+      <section class="settings-card">
+        <h2>Automation Rules</h2>
+        <p>Small first step: define what action to plan when a message is received in a specific tab.</p>
+        <form id="rule-form">
+          <label>
+            Trigger tab
+            <select id="trigger-tab"></select>
+          </label>
+          <label>
+            Action
+            <select id="action-type">
+              <option value="send_message">Send message</option>
+              <option value="schedule_meeting">Schedule meeting</option>
+              <option value="research_past_conversation">Research past conversation</option>
+              <option value="initiate_new_conversation">Initiate new conversation</option>
+            </select>
+          </label>
+          <label>
+            Details
+            <input id="action-details" type="text" placeholder="Example: draft response to PM team" />
+          </label>
+          <button type="submit">Add rule</button>
+        </form>
+        <ul id="rules-list"></ul>
+      </section>
+
+      <section class="settings-card">
+        <h2>Simulate Incoming Message</h2>
+        <form id="simulate-form">
+          <label>
+            Tab
+            <select id="simulate-tab"></select>
+          </label>
+          <label>
+            Message title
+            <input id="simulate-title" type="text" placeholder="Urgent: incident update" />
+          </label>
+          <label>
+            Message body
+            <input id="simulate-body" type="text" placeholder="Can you jump on a quick call?" />
+          </label>
+          <button type="submit">Run simulation</button>
+        </form>
+      </section>
+
+      <section class="settings-card">
+        <h2>Automation Event Stream</h2>
+        <ul id="events-list"></ul>
+      </section>
+    </main>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>
