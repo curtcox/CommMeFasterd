@@ -3,6 +3,7 @@ const appApi = window.commMeFasterd;
 const el = {
   tabs: document.getElementById("tabs"),
   settingsPanel: document.getElementById("settings-panel"),
+  settingsViewTabs: document.getElementById("settings-view-tabs"),
   databasePanel: document.getElementById("database-panel"),
   activeViewState: document.getElementById("active-view-state"),
 
@@ -80,6 +81,7 @@ let dbTables = [];
 let dbCounts = {};
 let activeDbTable = "";
 let activeDatabaseView = "explorer";
+let activeSettingsView = "llm";
 let activeDbColumns = [];
 let activeDbRows = [];
 let activeDbSort = { column: "", direction: "asc" };
@@ -100,6 +102,19 @@ function setActiveDatabaseView(view) {
   });
   el.dbExplorerView.classList.toggle("hidden", activeDatabaseView !== "explorer");
   el.dbToolsView.classList.toggle("hidden", activeDatabaseView !== "tools");
+}
+
+function setActiveSettingsView(view) {
+  const buttons = el.settingsViewTabs.querySelectorAll("button[data-settings-view]");
+  const allowedViews = Array.from(buttons).map((button) => button.dataset.settingsView);
+  activeSettingsView = allowedViews.includes(view) ? view : allowedViews[0] || "llm";
+  buttons.forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.settingsView === activeSettingsView);
+  });
+  const views = el.settingsPanel.querySelectorAll(".settings-view[data-settings-view]");
+  views.forEach((panel) => {
+    panel.classList.toggle("hidden", panel.dataset.settingsView !== activeSettingsView);
+  });
 }
 
 function tableWithCountLabel(table) {
@@ -861,6 +876,14 @@ async function initializeForms() {
     setActiveDatabaseView(button.dataset.dbView);
   });
 
+  el.settingsViewTabs.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-settings-view]");
+    if (!button) {
+      return;
+    }
+    setActiveSettingsView(button.dataset.settingsView);
+  });
+
   el.dbRowLimit.addEventListener("change", async () => {
     if (currentActiveTab === "database") {
       await renderActiveDbTable();
@@ -923,6 +946,7 @@ function registerRealtimeListeners() {
 
 async function bootstrap() {
   setDefaultInspectionTime();
+  setActiveSettingsView(activeSettingsView);
   setActiveDatabaseView(activeDatabaseView);
   await renderTabStrip();
   registerRealtimeListeners();

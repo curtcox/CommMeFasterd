@@ -89,9 +89,39 @@ body {
 
 .settings {
   padding: 108px 12px 16px;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  min-height: calc(100vh - 100px);
+}
+
+.settings-shell {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
   gap: 10px;
+}
+
+.settings-view {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  background: var(--surface-strong);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+}
+
+.settings-view h2 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.settings-view p {
+  margin: 0 0 12px;
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .database {
@@ -401,6 +431,5 @@ ul {
 
   .settings {
     padding-top: 122px;
-    grid-template-columns: 1fr;
   }
 }
