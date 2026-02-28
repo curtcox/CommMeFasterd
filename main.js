@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const { app, BrowserWindow, BrowserView, ipcMain } = require("electron");
 const { collectCaptureFrameTargetsFromMainFrame } = require("./capture_frame_targets");
+const { resolveOutlookMailUrl } = require("./outlook_target_url");
 
 let sqlite3 = null;
 try {
@@ -54,7 +55,7 @@ const DB_TABLE_SORT = {
 const TABS = [
   { id: "slack", label: "Slack", url: "https://app.slack.com/client", type: "web" },
   { id: "teams", label: "Teams", url: "https://teams.microsoft.com", type: "web" },
-  { id: "office", label: "Office", url: "https://www.office.com", type: "web" },
+  { id: "office", label: "Office", url: "https://outlook.office.com/mail/", type: "web" },
   { id: "gmail", label: "Gmail", url: "https://mail.google.com", type: "web" },
   { id: "calendar", label: "Google Calendar", url: "https://calendar.google.com", type: "web" },
   { id: "settings", label: "Settings", type: "local" },
@@ -593,11 +594,11 @@ function persistOutlookAutomationRun(run) {
     const timestamp = run.startedAt.replace(/[:.]/g, "-");
     const runPath = path.join(diagnosticsDir, `outlook-capture-run-${timestamp}.json`);
     const lastPath = outlookLastRunPath();
+    run.logPath = runPath;
+    run.lastLogPath = lastPath;
     const body = JSON.stringify(run, null, 2);
     fs.writeFileSync(runPath, body);
     fs.writeFileSync(lastPath, body);
-    run.logPath = runPath;
-    run.lastLogPath = lastPath;
   } catch (error) {
     run.summary = {
       ...(run.summary || {}),
@@ -781,6 +782,22 @@ async function runOutlookCaptureAutomation(reason) {
         switchedTo: "office",
         officeUrl: officeView.webContents.getURL()
       });
+
+      const currentOfficeUrl = officeView.webContents.getURL();
+      const targetOutlookUrl = resolveOutlookMailUrl(currentOfficeUrl);
+      if (targetOutlookUrl !== currentOfficeUrl) {
+        pushOutlookAutomationStep(run, "navigate-outlook-mail", {
+          from: currentOfficeUrl || "(empty)",
+          to: targetOutlookUrl
+        });
+        try {
+          await officeView.webContents.loadURL(targetOutlookUrl);
+        } catch (error) {
+          pushOutlookAutomationStep(run, "navigate-outlook-mail-error", {
+            error: error.message || "Failed to load Outlook mail URL"
+          });
+        }
+      }
 
       const idleResult = await waitForWebContentsIdle(officeView.webContents, OUTLOOK_AUTOMATION_NAV_WAIT_MS);
       pushOutlookAutomationStep(run, "wait-idle", idleResult);
