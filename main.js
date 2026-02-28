@@ -16,6 +16,8 @@ const MAX_EVALUATIONS = 1200;
 const MAX_CONSOLE_LOGS = 800;
 const MAX_HTTP_TRAFFIC = 1200;
 const MAX_SCREENSHOTS = 200;
+const DOM_CAPTURE_INTERVAL_MS = 6000;
+const MAX_DOM_CAPTURE_KEYS = 20000;
 
 const DB_TABLES = [
   "llm_settings",
@@ -74,6 +76,10 @@ const pendingNetworkRequests = new Map();
 let activeTabId = "slack";
 let screenshotsDir = "";
 let networkObserversInstalled = false;
+let domCaptureIntervalHandle = null;
+const domCaptureInFlightTabs = new Set();
+const seenDomMessageKeys = new Set();
+const seenDomMessageKeyQueue = [];
 
 /** @type {import("sqlite3").Database | null} */
 let db = null;
@@ -111,6 +117,337 @@ function trimArraySize(arr, max) {
   if (arr.length > max) {
     arr.length = max;
   }
+}
+
+function normalizeDomCaptureKeyPart(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function rememberDomMessageKey(key) {
+  if (!key) {
+    return false;
+  }
+  if (seenDomMessageKeys.has(key)) {
+    return false;
+  }
+  seenDomMessageKeys.add(key);
+  seenDomMessageKeyQueue.push(key);
+  if (seenDomMessageKeyQueue.length > MAX_DOM_CAPTURE_KEYS) {
+    const removed = seenDomMessageKeyQueue.shift();
+    if (removed) {
+      seenDomMessageKeys.delete(removed);
+    }
+  }
+  return true;
+}
+
+function buildDomMessageDedupKey(tabId, candidate) {
+  const source = normalizeDomCaptureKeyPart(candidate.source || "dom");
+  const keyPart = normalizeDomCaptureKeyPart(
+    candidate.key || `${candidate.title || ""}|${candidate.body || ""}`.slice(0, 600)
+  );
+  return `${tabId}|${source}|${keyPart}`;
+}
+
+function sanitizeCapturedMessageCandidate(candidate) {
+  return {
+    title: String(candidate.title || "").trim().slice(0, 300),
+    body: String(candidate.body || "").trim().slice(0, 3000),
+    source: String(candidate.source || "dom-capture").trim().slice(0, 120),
+    key: String(candidate.key || "").trim().slice(0, 600)
+  };
+}
+
+function collectVisibleMessagesFromDom() {
+  const MAX_ITEMS = 120;
+  const items = [];
+  const seen = new Set();
+
+  function normalize(text) {
+    return String(text || "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function textFromNode(node) {
+    return normalize(node && node.textContent ? node.textContent : "");
+  }
+
+  function firstText(root, selectors) {
+    if (!root) {
+      return "";
+    }
+    for (const selector of selectors) {
+      const node = root.querySelector(selector);
+      const text = textFromNode(node);
+      if (text) {
+        return text;
+      }
+    }
+    return "";
+  }
+
+  function isVisible(node) {
+    if (!node || typeof node.getBoundingClientRect !== "function") {
+      return false;
+    }
+    const style = window.getComputedStyle(node);
+    if (!style || style.display === "none" || style.visibility === "hidden" || Number(style.opacity || "1") === 0) {
+      return false;
+    }
+    const rect = node.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) {
+      return false;
+    }
+    return rect.bottom >= -50 && rect.top <= window.innerHeight + 50;
+  }
+
+  function addItem(rawKey, title, body, source) {
+    if (items.length >= MAX_ITEMS) {
+      return;
+    }
+    const normalizedTitle = normalize(title).slice(0, 300);
+    const normalizedBody = normalize(body).slice(0, 3000);
+    if (!normalizedTitle && !normalizedBody) {
+      return;
+    }
+    if (!normalizedBody && normalizedTitle.length < 3) {
+      return;
+    }
+    const key = normalize(rawKey) || `${normalizedTitle}|${normalizedBody.slice(0, 180)}`;
+    const dedupe = `${source}|${key}`.toLowerCase();
+    if (seen.has(dedupe)) {
+      return;
+    }
+    seen.add(dedupe);
+    items.push({ key, title: normalizedTitle, body: normalizedBody, source });
+  }
+
+  function scanRows(selectors, parser) {
+    for (const selector of selectors) {
+      const nodes = Array.from(document.querySelectorAll(selector));
+      for (const node of nodes) {
+        if (items.length >= MAX_ITEMS) {
+          return;
+        }
+        if (!isVisible(node)) {
+          continue;
+        }
+        parser(node);
+      }
+    }
+  }
+
+  const host = String(location.hostname || "").toLowerCase();
+
+  if (host.includes("slack.com")) {
+    scanRows(["[data-qa=\"message_container\"]", ".c-message_kit__background"], (row) => {
+      const author = firstText(row, [
+        "[data-qa=\"message_sender\"]",
+        ".c-message__sender_link",
+        ".c-message_kit__sender_button",
+        ".c-message_kit__display_name"
+      ]);
+      const body =
+        firstText(row, [
+          "[data-qa=\"message-text\"]",
+          ".c-message_kit__text",
+          ".p-rich_text_section",
+          ".c-message__body"
+        ]) || textFromNode(row);
+      const timestamp = firstText(row, ["a[data-qa=\"timestamp_link\"]", "time"]);
+      const key =
+        row.getAttribute("data-qa-message-id") ||
+        row.getAttribute("data-message-id") ||
+        row.id ||
+        `${author}|${timestamp}|${body.slice(0, 180)}`;
+      addItem(key, author || "Slack", body, "dom-slack");
+    });
+  } else if (host.includes("teams.microsoft.com")) {
+    scanRows(
+      ["[data-tid=\"chat-pane-message\"]", "[data-tid=\"message-thread-message\"]", "[data-tid=\"chat-pane-list-item\"]"],
+      (row) => {
+        const author = firstText(row, [
+          "[data-tid=\"threadBodyDisplayName\"]",
+          "[data-tid=\"message-author-name\"]",
+          "[data-tid=\"chat-pane-message-sender\"]"
+        ]);
+        const body =
+          firstText(row, [
+            "[data-tid=\"chat-pane-message-content\"]",
+            "[data-tid=\"messageBodyContent\"]",
+            "[data-tid=\"richText\"]"
+          ]) || textFromNode(row);
+        const timestamp = firstText(row, ["[data-tid=\"message-timestamp\"]", "time"]);
+        const key =
+          row.getAttribute("data-message-id") ||
+          row.id ||
+          `${author}|${timestamp}|${body.slice(0, 180)}`;
+        addItem(key, author || "Teams", body, "dom-teams");
+      }
+    );
+    scanRows(["[data-tid=\"messageBodyContent\"]"], (row) => {
+      const body = textFromNode(row);
+      if (!body) {
+        return;
+      }
+      const container = row.closest("[data-tid=\"chat-pane-message\"], [data-tid=\"message-thread-message\"]");
+      const author = firstText(container || document, [
+        "[data-tid=\"threadBodyDisplayName\"]",
+        "[data-tid=\"message-author-name\"]"
+      ]);
+      const key =
+        (container && (container.getAttribute("data-message-id") || container.id)) ||
+        `${author}|${body.slice(0, 180)}`;
+      addItem(key, author || "Teams", body, "dom-teams");
+    });
+  } else if (host.includes("mail.google.com")) {
+    scanRows(["tr.zA"], (row) => {
+      const author = firstText(row, ["span[email]", ".yW span", ".yP"]);
+      const subject = firstText(row, [".bog", ".bqe"]);
+      const snippet = firstText(row, [".y2", ".y6"]);
+      const body = normalize(`${subject} ${snippet}`);
+      const key =
+        row.getAttribute("data-legacy-message-id") ||
+        row.getAttribute("data-thread-id") ||
+        row.id ||
+        `${author}|${body.slice(0, 180)}`;
+      addItem(key, author || subject || "Gmail", body, "dom-gmail-list");
+    });
+    scanRows(["div.a3s.aiL", "div.a3s"], (row) => {
+      const body = textFromNode(row);
+      if (body.length < 10) {
+        return;
+      }
+      const mailContainer = row.closest(".adn, .ii.gt");
+      const author = firstText(mailContainer || document, [".gD", ".go", "h3.iw span[email]"]);
+      const key =
+        (mailContainer &&
+          (mailContainer.getAttribute("data-legacy-message-id") || mailContainer.getAttribute("data-message-id"))) ||
+        `${author}|${body.slice(0, 180)}`;
+      addItem(key, author || "Gmail", body, "dom-gmail-open");
+    });
+  } else if (host.includes("office.com") || host.includes("outlook.office.com") || host.includes("outlook.live.com")) {
+    scanRows(["div[role=\"option\"][data-convid]", "div[data-convid]", "div[role=\"article\"]"], (row) => {
+      const author = firstText(row, [
+        ".ms-Persona-primaryText",
+        "span[title*=\"@\"]",
+        "[data-app-section=\"PersonaHeader\"] span"
+      ]);
+      const subject = firstText(row, [
+        "[data-app-section=\"MailReadComposeSubjectLine\"]",
+        ".SubjectLine",
+        "[role=\"heading\"]"
+      ]);
+      const preview = firstText(row, [".PreviewText", ".wellItemBody"]);
+      const body = normalize(`${subject} ${preview} ${textFromNode(row).slice(0, 600)}`);
+      const key = row.getAttribute("data-convid") || row.id || `${author}|${subject}|${body.slice(0, 120)}`;
+      addItem(key, author || subject || "Office", body, "dom-office");
+    });
+  }
+
+  if (items.length < 10) {
+    scanRows(["[role=\"article\"]", "article", "[data-message-id]"], (row) => {
+      const body = textFromNode(row);
+      if (body.length < 20) {
+        return;
+      }
+      const title = firstText(row, ["h1", "h2", "h3", "strong"]) || normalize(document.title);
+      const key = row.getAttribute("data-message-id") || row.id || `${title}|${body.slice(0, 180)}`;
+      addItem(key, title || "Message", body, "dom-generic");
+    });
+  }
+
+  return {
+    host,
+    url: location.href,
+    items: items.slice(0, MAX_ITEMS)
+  };
+}
+
+const DOM_CAPTURE_SCRIPT = `(${collectVisibleMessagesFromDom.toString()})();`;
+
+async function captureVisibleMessagesFromTab(tabId) {
+  if (domCaptureInFlightTabs.has(tabId)) {
+    return;
+  }
+  const view = tabViews.get(tabId);
+  if (!view) {
+    return;
+  }
+  const wc = view.webContents;
+  if (!wc || wc.isDestroyed() || wc.isLoading()) {
+    return;
+  }
+  const url = wc.getURL();
+  if (!url || !/^https?:/i.test(url)) {
+    return;
+  }
+
+  domCaptureInFlightTabs.add(tabId);
+  try {
+    const result = await wc.executeJavaScript(DOM_CAPTURE_SCRIPT);
+    const candidates = result && Array.isArray(result.items) ? result.items : [];
+    for (const rawCandidate of candidates) {
+      const candidate = sanitizeCapturedMessageCandidate(rawCandidate || {});
+      if (!candidate.title && !candidate.body) {
+        continue;
+      }
+      const dedupeKey = buildDomMessageDedupKey(tabId, candidate);
+      if (!rememberDomMessageKey(dedupeKey)) {
+        continue;
+      }
+      addMessage(tabId, {
+        title: candidate.title,
+        body: candidate.body,
+        source: candidate.source || "dom-capture"
+      });
+    }
+  } catch (_error) {
+    // Ignore transient DOM extraction failures during navigation.
+  } finally {
+    domCaptureInFlightTabs.delete(tabId);
+  }
+}
+
+function requestVisibleMessageCapture(tabId) {
+  captureVisibleMessagesFromTab(tabId).catch(() => {
+    // Ignore capture errors in background polling.
+  });
+}
+
+async function captureVisibleMessagesFromAllTabs() {
+  for (const tab of TABS) {
+    if (tab.type !== "web") {
+      continue;
+    }
+    await captureVisibleMessagesFromTab(tab.id);
+  }
+}
+
+function startVisibleMessageCaptureLoop() {
+  if (domCaptureIntervalHandle) {
+    return;
+  }
+  domCaptureIntervalHandle = setInterval(() => {
+    captureVisibleMessagesFromAllTabs().catch(() => {
+      // Keep polling loop alive.
+    });
+  }, DOM_CAPTURE_INTERVAL_MS);
+  captureVisibleMessagesFromAllTabs().catch(() => {
+    // Ignore startup capture errors.
+  });
+}
+
+function stopVisibleMessageCaptureLoop() {
+  if (domCaptureIntervalHandle) {
+    clearInterval(domCaptureIntervalHandle);
+    domCaptureIntervalHandle = null;
+  }
+  domCaptureInFlightTabs.clear();
 }
 
 function buildTabState(tabId) {
@@ -370,14 +707,23 @@ async function loadStateFromDb() {
 
   const messageRows = await dbAll("SELECT * FROM messages ORDER BY created_at DESC LIMIT ?", [MAX_MESSAGES]);
   messageRows.forEach((row) => {
-    messageHistory.push({
+    const hydrated = {
       id: row.id,
       createdAt: row.created_at,
       tabId: row.tab_id,
       source: row.source,
       title: row.title,
       body: row.body
-    });
+    };
+    messageHistory.push(hydrated);
+    if (String(hydrated.source || "").startsWith("dom-")) {
+      rememberDomMessageKey(
+        buildDomMessageDedupKey(hydrated.tabId, {
+          source: hydrated.source,
+          key: `${hydrated.title}|${hydrated.body.slice(0, 180)}`
+        })
+      );
+    }
   });
 
   const evalRows = await dbAll("SELECT * FROM trigger_evaluations ORDER BY created_at DESC LIMIT ?", [MAX_EVALUATIONS]);
@@ -1460,14 +1806,17 @@ function attachViewObservers(tabId, view) {
   wc.on("did-stop-loading", () => {
     emitState();
     insertAppEvent(tabId, "did-stop-loading", { url: wc.getURL(), title: wc.getTitle() });
+    requestVisibleMessageCapture(tabId);
   });
   wc.on("did-navigate", (_event, url) => {
     emitState();
     insertAppEvent(tabId, "did-navigate", { url });
+    requestVisibleMessageCapture(tabId);
   });
   wc.on("did-navigate-in-page", (_event, url) => {
     emitState();
     insertAppEvent(tabId, "did-navigate-in-page", { url });
+    requestVisibleMessageCapture(tabId);
   });
   wc.on("page-title-updated", (_event, title) => {
     emitState();
@@ -1548,6 +1897,7 @@ function switchToTab(tabId) {
   setViewBounds();
   broadcast("tab:active", { tabId, type: "web" });
   broadcast("tab:state", buildTabState(tabId));
+  requestVisibleMessageCapture(tabId);
 }
 
 function wireIpcHandlers() {
@@ -1697,8 +2047,10 @@ function createMainWindow() {
       createWebTabView(tab);
     }
   }
+  startVisibleMessageCaptureLoop();
   mainWindow.on("resize", setViewBounds);
   mainWindow.on("closed", () => {
+    stopVisibleMessageCaptureLoop();
     mainWindow = null;
   });
   switchToTab(activeTabId);
