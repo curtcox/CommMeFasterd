@@ -18,9 +18,8 @@ Minimal first step for a Mac Electron multi-app communication shell.
   - triggers, actions, schedules, evaluations, automation events
   - LLM settings
 - Database tab:
-  - inspect database path and table counts
-  - inspect recent app events and recent messages
-  - inspect recent web console logs, HTTP traffic, and screenshot history
+  - inspect one DB table at a time via sub-tabs (`llm_settings`, `actions`, `triggers`, `messages`, `trigger_evaluations`, `automation_events`, `app_events`, `console_logs`, `http_traffic`, `screenshots`)
+  - inspect database path and row counts
   - capture on-demand screenshots from wrapped app tabs
   - run read-only SQL queries (`SELECT`, `WITH`, `PRAGMA`, `EXPLAIN`)
 - Basic active-tab introspection (`title`, `url`, loading, navigation state).
@@ -42,7 +41,7 @@ npm start
    - event stream updates
    - trigger history shows whether the trigger matched that message
 8. Use schedule inspector with a past and future timestamp.
-9. Open the `Database` tab and verify counts and recent events/messages update.
+9. Open the `Database` tab, switch sub-tabs, and verify each table loads independently.
 10. In `Database`, verify:
    - web console logs appear
    - HTTP traffic appears

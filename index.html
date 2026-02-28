@@ -162,62 +162,41 @@
 
     <main id="database-panel" class="settings hidden">
       <section class="settings-card">
-        <h2>Database Overview</h2>
-        <p>SQLite file used for app events, messages, triggers, actions, schedules, and settings.</p>
+        <h2>Database Explorer</h2>
+        <p>Use sub-tabs to inspect one database table at a time.</p>
         <div><strong>Path:</strong> <code id="db-path">(loading)</code></div>
-        <button id="db-refresh" type="button">Refresh Overview</button>
-        <ul id="db-counts-list"></ul>
-      </section>
-
-      <section class="settings-card">
-        <h2>Read-Only SQL Query</h2>
-        <p>Allowed statements: <code>SELECT</code>, <code>WITH</code>, <code>PRAGMA</code>, <code>EXPLAIN</code>.</p>
-        <form id="db-query-form">
+        <div class="inline-check">
           <label>
-            SQL
-            <textarea id="db-sql" rows="6" placeholder="SELECT * FROM messages ORDER BY created_at DESC LIMIT 20;"></textarea>
+            Row limit
+            <input id="db-row-limit" type="number" min="1" max="500" value="50" />
           </label>
-          <button type="submit">Run Query</button>
-        </form>
-        <pre id="db-query-result" class="code-block"></pre>
+          <button id="db-refresh" type="button">Refresh Selected Table</button>
+        </div>
+        <nav id="db-subtabs" class="tabs" aria-label="Database table sub-tabs"></nav>
+        <div class="meta" id="db-table-meta"></div>
+        <pre id="db-table-result" class="code-block"></pre>
       </section>
 
       <section class="settings-card">
-        <h2>Screenshot Capture</h2>
+        <h2>Database Tools</h2>
         <form id="diag-screenshot-form">
           <label>
-            Tab
+            Capture screenshot from tab
             <select id="diag-screenshot-tab"></select>
           </label>
           <button type="submit">Capture Screenshot</button>
         </form>
         <div class="meta" id="diag-screenshot-meta">No screenshot captured this session.</div>
         <img id="diag-screenshot-preview" class="screenshot-preview hidden" alt="Latest screenshot preview" />
-      </section>
 
-      <section class="settings-card">
-        <h2>Recent App Events</h2>
-        <ul id="db-recent-events"></ul>
-      </section>
-
-      <section class="settings-card">
-        <h2>Recent Messages</h2>
-        <ul id="db-recent-messages"></ul>
-      </section>
-
-      <section class="settings-card">
-        <h2>Recent Web Console Logs</h2>
-        <ul id="db-console-logs"></ul>
-      </section>
-
-      <section class="settings-card">
-        <h2>Recent HTTP Traffic</h2>
-        <ul id="db-http-traffic"></ul>
-      </section>
-
-      <section class="settings-card">
-        <h2>Recent Screenshots</h2>
-        <ul id="db-screenshots"></ul>
+        <form id="db-query-form">
+          <label>
+            Read-only SQL
+            <textarea id="db-sql" rows="6" placeholder="SELECT * FROM messages ORDER BY created_at DESC LIMIT 20;"></textarea>
+          </label>
+          <button type="submit">Run Query</button>
+        </form>
+        <pre id="db-query-result" class="code-block"></pre>
       </section>
     </main>
 

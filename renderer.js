@@ -44,17 +44,15 @@ const el = {
   eventsList: document.getElementById("events-list"),
 
   dbPath: document.getElementById("db-path"),
+  dbRowLimit: document.getElementById("db-row-limit"),
   dbRefresh: document.getElementById("db-refresh"),
-  dbCountsList: document.getElementById("db-counts-list"),
-  dbRecentEvents: document.getElementById("db-recent-events"),
-  dbRecentMessages: document.getElementById("db-recent-messages"),
+  dbSubtabs: document.getElementById("db-subtabs"),
+  dbTableMeta: document.getElementById("db-table-meta"),
+  dbTableResult: document.getElementById("db-table-result"),
+
   dbQueryForm: document.getElementById("db-query-form"),
   dbSql: document.getElementById("db-sql"),
   dbQueryResult: document.getElementById("db-query-result"),
-  dbConsoleLogs: document.getElementById("db-console-logs"),
-  dbHttpTraffic: document.getElementById("db-http-traffic"),
-  dbScreenshots: document.getElementById("db-screenshots"),
-
   diagScreenshotForm: document.getElementById("diag-screenshot-form"),
   diagScreenshotTab: document.getElementById("diag-screenshot-tab"),
   diagScreenshotMeta: document.getElementById("diag-screenshot-meta"),
@@ -64,9 +62,24 @@ const el = {
 let currentActiveTab = "";
 let actionCache = [];
 let triggerCache = [];
+let dbTables = [];
+let dbCounts = {};
+let activeDbTable = "";
 
 function tabButtonClass(tabId) {
   return tabId === currentActiveTab ? "tab-button is-active" : "tab-button";
+}
+
+function dbSubtabClass(table) {
+  return table === activeDbTable ? "tab-button is-active" : "tab-button";
+}
+
+function tableWithCountLabel(table) {
+  const count = dbCounts[table];
+  if (typeof count === "number") {
+    return `${table} (${count})`;
+  }
+  return table;
 }
 
 function setDefaultInspectionTime() {
@@ -76,6 +89,16 @@ function setDefaultInspectionTime() {
   const now = new Date();
   const localIso = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
   el.scheduleInspectAt.value = localIso;
+}
+
+function populateSelect(select, values) {
+  select.innerHTML = "";
+  values.forEach((value) => {
+    const option = document.createElement("option");
+    option.value = value.id;
+    option.textContent = value.label;
+    select.appendChild(option);
+  });
 }
 
 async function renderTabStrip() {
@@ -94,31 +117,20 @@ async function renderTabStrip() {
     el.tabs.appendChild(button);
   });
 
+  const webTabs = data.tabs.filter((tab) => tab.type === "web");
   const sourceTabOptions = [{ id: "any", label: "Any source" }].concat(
-    data.tabs.filter((tab) => tab.type === "web").map((tab) => ({ id: tab.id, label: tab.label }))
+    webTabs.map((tab) => ({ id: tab.id, label: tab.label }))
   );
   populateSelect(el.triggerSourceTab, sourceTabOptions);
-  populateSelect(
-    el.simulateTab,
-    data.tabs.filter((tab) => tab.type === "web").map((tab) => ({ id: tab.id, label: tab.label }))
-  );
+  populateSelect(el.simulateTab, webTabs.map((tab) => ({ id: tab.id, label: tab.label })));
   populateSelect(
     el.diagScreenshotTab,
     [{ id: "__active__", label: "Active web tab" }].concat(
-      data.tabs.filter((tab) => tab.type === "web").map((tab) => ({ id: tab.id, label: tab.label }))
+      webTabs.map((tab) => ({ id: tab.id, label: tab.label }))
     )
   );
-  updateLocalPanelsVisibility();
-}
 
-function populateSelect(select, values) {
-  select.innerHTML = "";
-  values.forEach((value) => {
-    const option = document.createElement("option");
-    option.value = value.id;
-    option.textContent = value.label;
-    select.appendChild(option);
-  });
+  updateLocalPanelsVisibility();
 }
 
 function updateLocalPanelsVisibility() {
@@ -239,6 +251,9 @@ async function renderActions() {
       await renderActions();
       await renderTriggers();
       await renderScheduleInspection();
+      if (currentActiveTab === "database") {
+        await renderDbExplorer();
+      }
     });
     const enabledText = document.createElement("span");
     enabledText.textContent = "enabled";
@@ -258,7 +273,6 @@ async function renderActions() {
     instructions.className = "meta";
     instructions.textContent = `instructions: ${action.instructions}`;
     item.appendChild(instructions);
-
     item.appendChild(createCodeDetails("action", action.generatedCode));
     el.actionsList.appendChild(item);
   });
@@ -283,7 +297,6 @@ async function renderTriggers() {
 
     const topRow = document.createElement("div");
     topRow.className = "entity-top";
-
     const title = document.createElement("strong");
     title.textContent = `${trigger.name} [${trigger.sourceTab}]`;
 
@@ -296,6 +309,9 @@ async function renderTriggers() {
       await appApi.automation.setTriggerEnabled({ triggerId: trigger.id, enabled: enabledBox.checked });
       await renderTriggers();
       await renderScheduleInspection();
+      if (currentActiveTab === "database") {
+        await renderDbExplorer();
+      }
     });
     const enabledText = document.createElement("span");
     enabledText.textContent = "enabled";
@@ -428,64 +444,73 @@ async function renderScheduleInspection() {
   });
 }
 
-async function renderDbOverview() {
-  const data = await appApi.database.getOverview();
-  el.dbCountsList.innerHTML = "";
-  el.dbRecentEvents.innerHTML = "";
-  el.dbRecentMessages.innerHTML = "";
-  el.dbConsoleLogs.innerHTML = "";
-  el.dbHttpTraffic.innerHTML = "";
-  el.dbScreenshots.innerHTML = "";
+function getDbRowLimit() {
+  return Math.max(1, Math.min(500, Number(el.dbRowLimit.value) || 50));
+}
 
-  if (!data.ok) {
-    el.dbPath.textContent = data.dbPath || "(unavailable)";
-    const err = document.createElement("li");
-    err.textContent = data.error || "Database not ready.";
-    el.dbCountsList.appendChild(err);
+function renderDbSubtabs() {
+  el.dbSubtabs.innerHTML = "";
+  dbTables.forEach((table) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = dbSubtabClass(table);
+    button.textContent = tableWithCountLabel(table);
+    button.addEventListener("click", async () => {
+      activeDbTable = table;
+      renderDbSubtabs();
+      await renderActiveDbTable();
+    });
+    el.dbSubtabs.appendChild(button);
+  });
+}
+
+async function renderActiveDbTable() {
+  if (!activeDbTable) {
+    el.dbTableMeta.textContent = "No table selected.";
+    el.dbTableResult.textContent = "";
     return;
   }
 
-  el.dbPath.textContent = data.dbPath;
-  Object.entries(data.counts).forEach(([table, count]) => {
-    const item = document.createElement("li");
-    item.textContent = `${table}: ${count}`;
-    el.dbCountsList.appendChild(item);
-  });
+  const result = await appApi.database.getTableRows({ table: activeDbTable, limit: getDbRowLimit() });
+  if (!result.ok) {
+    el.dbTableMeta.textContent = `Error loading ${activeDbTable}: ${result.error}`;
+    el.dbTableResult.textContent = "";
+    return;
+  }
 
-  data.recentAppEvents.forEach((evt) => {
-    const item = document.createElement("li");
-    item.className = "entity-item";
-    item.textContent = `[${evt.createdAt}] ${evt.tabId} ${evt.eventType} ${JSON.stringify(evt.payload)}`;
-    el.dbRecentEvents.appendChild(item);
-  });
+  const total = dbCounts[activeDbTable];
+  const displayed = result.rows.length;
+  el.dbTableMeta.textContent = `${activeDbTable} | showing ${displayed} row(s) | total ${total ?? "unknown"} row(s)`;
+  el.dbTableResult.textContent = JSON.stringify(
+    {
+      table: activeDbTable,
+      columns: result.columns,
+      rows: result.rows
+    },
+    null,
+    2
+  );
+}
 
-  data.recentMessages.forEach((msg) => {
-    const item = document.createElement("li");
-    item.className = "entity-item";
-    item.textContent = `[${msg.createdAt}] ${msg.tabId} ${msg.source} | ${msg.title} | ${msg.body}`;
-    el.dbRecentMessages.appendChild(item);
-  });
+async function renderDbExplorer() {
+  const overview = await appApi.database.getOverview();
+  if (!overview.ok) {
+    el.dbPath.textContent = overview.dbPath || "(unavailable)";
+    el.dbTableMeta.textContent = overview.error || "Database not ready.";
+    el.dbTableResult.textContent = "";
+    el.dbSubtabs.innerHTML = "";
+    return;
+  }
 
-  (data.recentConsoleLogs || []).forEach((log) => {
-    const item = document.createElement("li");
-    item.className = "entity-item";
-    item.textContent = `[${log.createdAt}] ${log.tabId} lvl=${log.level} ${log.message} (${log.sourceId}:${log.line})`;
-    el.dbConsoleLogs.appendChild(item);
-  });
-
-  (data.recentHttpTraffic || []).forEach((req) => {
-    const item = document.createElement("li");
-    item.className = "entity-item";
-    item.textContent = `[${req.createdAt}] ${req.tabId} ${req.method} ${req.statusCode} ${req.resourceType} ${req.url}${req.error ? ` error=${req.error}` : ""}`;
-    el.dbHttpTraffic.appendChild(item);
-  });
-
-  (data.recentScreenshots || []).forEach((shot) => {
-    const item = document.createElement("li");
-    item.className = "entity-item";
-    item.textContent = `[${shot.createdAt}] ${shot.tabId} ${shot.width}x${shot.height} ${shot.filePath}`;
-    el.dbScreenshots.appendChild(item);
-  });
+  el.dbPath.textContent = overview.dbPath;
+  dbTables = Array.isArray(overview.tables) ? overview.tables : Object.keys(overview.counts || {});
+  dbCounts = overview.counts || {};
+  if (!activeDbTable || !dbTables.includes(activeDbTable)) {
+    const firstNonEmpty = dbTables.find((table) => Number(dbCounts[table] || 0) > 0);
+    activeDbTable = firstNonEmpty || dbTables[0] || "";
+  }
+  renderDbSubtabs();
+  await renderActiveDbTable();
 }
 
 async function runDbQuery() {
@@ -495,12 +520,15 @@ async function runDbQuery() {
     el.dbQueryResult.textContent = `Error: ${result.error}`;
     return;
   }
-  const output = {
-    rowCount: result.rows.length,
-    columns: result.columns,
-    rows: result.rows
-  };
-  el.dbQueryResult.textContent = JSON.stringify(output, null, 2);
+  el.dbQueryResult.textContent = JSON.stringify(
+    {
+      rowCount: result.rows.length,
+      columns: result.columns,
+      rows: result.rows
+    },
+    null,
+    2
+  );
 }
 
 async function captureDiagnosticScreenshot() {
@@ -517,6 +545,9 @@ async function captureDiagnosticScreenshot() {
   el.diagScreenshotMeta.textContent = `[${result.screenshot.createdAt}] ${result.screenshot.tabId} ${result.screenshot.width}x${result.screenshot.height} ${result.screenshot.filePath}`;
   el.diagScreenshotPreview.src = result.dataUrl;
   el.diagScreenshotPreview.classList.remove("hidden");
+  if (currentActiveTab === "database") {
+    await renderDbExplorer();
+  }
 }
 
 async function initializeForms() {
@@ -547,7 +578,7 @@ async function initializeForms() {
     await renderTriggers();
     await renderScheduleInspection();
     if (currentActiveTab === "database") {
-      await renderDbOverview();
+      await renderDbExplorer();
     }
   });
 
@@ -570,7 +601,7 @@ async function initializeForms() {
     await renderScheduleInspection();
     await renderTriggerHistory();
     if (currentActiveTab === "database") {
-      await renderDbOverview();
+      await renderDbExplorer();
     }
   });
 
@@ -585,7 +616,7 @@ async function initializeForms() {
     el.simulateBody.value = "";
     await renderTriggerHistory();
     if (currentActiveTab === "database") {
-      await renderDbOverview();
+      await renderDbExplorer();
     }
   });
 
@@ -599,7 +630,13 @@ async function initializeForms() {
   });
 
   el.dbRefresh.addEventListener("click", async () => {
-    await renderDbOverview();
+    await renderDbExplorer();
+  });
+
+  el.dbRowLimit.addEventListener("change", async () => {
+    if (currentActiveTab === "database") {
+      await renderActiveDbTable();
+    }
   });
 
   el.dbQueryForm.addEventListener("submit", async (event) => {
@@ -610,7 +647,6 @@ async function initializeForms() {
   el.diagScreenshotForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     await captureDiagnosticScreenshot();
-    await renderDbOverview();
   });
 }
 
@@ -620,7 +656,7 @@ function registerRealtimeListeners() {
     await renderTabStrip();
     renderActiveState(await appApi.tabs.getActiveState());
     if (tabId === "database") {
-      await renderDbOverview();
+      await renderDbExplorer();
     }
   });
 
@@ -645,7 +681,7 @@ async function bootstrap() {
   await renderTriggers();
   await renderTriggerHistory();
   await renderScheduleInspection();
-  await renderDbOverview();
+  await renderDbExplorer();
   renderEvents(await appApi.automation.getRecentEvents());
   renderActiveState(await appApi.tabs.getActiveState());
 }

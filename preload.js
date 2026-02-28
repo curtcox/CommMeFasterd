@@ -32,6 +32,7 @@ contextBridge.exposeInMainWorld("commMeFasterd", {
   },
   database: {
     getOverview: () => ipcRenderer.invoke("database:overview"),
+    getTableRows: (payload) => ipcRenderer.invoke("database:table-rows", payload),
     query: (payload) => ipcRenderer.invoke("database:query", payload)
   }
 });

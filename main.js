@@ -17,6 +17,32 @@ const MAX_CONSOLE_LOGS = 800;
 const MAX_HTTP_TRAFFIC = 1200;
 const MAX_SCREENSHOTS = 200;
 
+const DB_TABLES = [
+  "llm_settings",
+  "actions",
+  "triggers",
+  "messages",
+  "trigger_evaluations",
+  "automation_events",
+  "app_events",
+  "console_logs",
+  "http_traffic",
+  "screenshots"
+];
+
+const DB_TABLE_SORT = {
+  llm_settings: "id DESC",
+  actions: "created_at DESC",
+  triggers: "created_at DESC",
+  messages: "created_at DESC",
+  trigger_evaluations: "created_at DESC",
+  automation_events: "id DESC",
+  app_events: "id DESC",
+  console_logs: "created_at DESC",
+  http_traffic: "created_at DESC",
+  screenshots: "created_at DESC"
+};
+
 const TABS = [
   { id: "slack", label: "Slack", url: "https://app.slack.com/client", type: "web" },
   { id: "teams", label: "Teams", url: "https://teams.microsoft.com", type: "web" },
@@ -1253,21 +1279,8 @@ async function databaseOverview() {
     };
   }
 
-  const countTables = [
-    "app_events",
-    "messages",
-    "automation_events",
-    "trigger_evaluations",
-    "actions",
-    "triggers",
-    "llm_settings",
-    "console_logs",
-    "http_traffic",
-    "screenshots"
-  ];
-
   const counts = {};
-  for (const table of countTables) {
+  for (const table of DB_TABLES) {
     const row = await dbGet(`SELECT COUNT(*) AS count FROM ${table}`);
     counts[table] = row ? row.count : 0;
   }
@@ -1291,6 +1304,7 @@ async function databaseOverview() {
   return {
     ok: true,
     dbPath,
+    tables: DB_TABLES.slice(),
     counts,
     recentAppEvents: recentAppEvents.map((row) => ({
       id: row.id,
@@ -1337,6 +1351,35 @@ async function databaseOverview() {
       height: row.height
     }))
   };
+}
+
+function isKnownDbTable(table) {
+  return DB_TABLES.includes(table);
+}
+
+async function databaseTableRows(table, limit) {
+  if (!dbReady) {
+    return { ok: false, error: dbError || "Database not ready." };
+  }
+  if (!isKnownDbTable(table)) {
+    return { ok: false, error: `Unknown table "${table}".` };
+  }
+
+  const safeLimit = Math.max(1, Math.min(500, Number(limit) || 50));
+  const orderBy = DB_TABLE_SORT[table] || "rowid DESC";
+  try {
+    const rows = await dbAll(`SELECT * FROM ${table} ORDER BY ${orderBy} LIMIT ?`, [safeLimit]);
+    const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
+    return {
+      ok: true,
+      table,
+      limit: safeLimit,
+      columns,
+      rows
+    };
+  } catch (error) {
+    return { ok: false, error: error.message || "Failed loading table rows." };
+  }
 }
 
 function isReadOnlySql(sql) {
@@ -1629,6 +1672,9 @@ function wireIpcHandlers() {
   );
 
   ipcMain.handle("database:overview", async () => databaseOverview());
+  ipcMain.handle("database:table-rows", async (_event, payload) =>
+    databaseTableRows((payload && payload.table) || "", (payload && payload.limit) || 50)
+  );
   ipcMain.handle("database:query", async (_event, payload) => runDatabaseQuery((payload && payload.sql) || ""));
 }
 
