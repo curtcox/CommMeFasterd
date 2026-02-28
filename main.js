@@ -165,6 +165,18 @@ function collectVisibleMessagesFromDom() {
   const MAX_ITEMS = 120;
   const items = [];
   const seen = new Set();
+  const documents = [document];
+
+  const iframes = Array.from(document.querySelectorAll("iframe"));
+  for (const frame of iframes) {
+    try {
+      if (frame.contentDocument && frame.contentDocument.documentElement) {
+        documents.push(frame.contentDocument);
+      }
+    } catch (_error) {
+      // Ignore cross-origin iframes.
+    }
+  }
 
   function normalize(text) {
     return String(text || "")
@@ -190,11 +202,20 @@ function collectVisibleMessagesFromDom() {
     return "";
   }
 
+  function queryAllAcrossDocuments(selector) {
+    const nodes = [];
+    for (const doc of documents) {
+      nodes.push(...Array.from(doc.querySelectorAll(selector)));
+    }
+    return nodes;
+  }
+
   function isVisible(node) {
     if (!node || typeof node.getBoundingClientRect !== "function") {
       return false;
     }
-    const style = window.getComputedStyle(node);
+    const ownerWindow = (node.ownerDocument && node.ownerDocument.defaultView) || window;
+    const style = ownerWindow.getComputedStyle(node);
     if (!style || style.display === "none" || style.visibility === "hidden" || Number(style.opacity || "1") === 0) {
       return false;
     }
@@ -202,7 +223,7 @@ function collectVisibleMessagesFromDom() {
     if (rect.width < 2 || rect.height < 2) {
       return false;
     }
-    return rect.bottom >= -50 && rect.top <= window.innerHeight + 50;
+    return rect.bottom >= -50 && rect.top <= ownerWindow.innerHeight + 50;
   }
 
   function addItem(rawKey, title, body, source) {
@@ -228,7 +249,7 @@ function collectVisibleMessagesFromDom() {
 
   function scanRows(selectors, parser) {
     for (const selector of selectors) {
-      const nodes = Array.from(document.querySelectorAll(selector));
+      const nodes = queryAllAcrossDocuments(selector);
       for (const node of nodes) {
         if (items.length >= MAX_ITEMS) {
           return;
@@ -330,23 +351,88 @@ function collectVisibleMessagesFromDom() {
         `${author}|${body.slice(0, 180)}`;
       addItem(key, author || "Gmail", body, "dom-gmail-open");
     });
-  } else if (host.includes("office.com") || host.includes("outlook.office.com") || host.includes("outlook.live.com")) {
-    scanRows(["div[role=\"option\"][data-convid]", "div[data-convid]", "div[role=\"article\"]"], (row) => {
-      const author = firstText(row, [
-        ".ms-Persona-primaryText",
-        "span[title*=\"@\"]",
-        "[data-app-section=\"PersonaHeader\"] span"
-      ]);
-      const subject = firstText(row, [
-        "[data-app-section=\"MailReadComposeSubjectLine\"]",
-        ".SubjectLine",
-        "[role=\"heading\"]"
-      ]);
-      const preview = firstText(row, [".PreviewText", ".wellItemBody"]);
-      const body = normalize(`${subject} ${preview} ${textFromNode(row).slice(0, 600)}`);
-      const key = row.getAttribute("data-convid") || row.id || `${author}|${subject}|${body.slice(0, 120)}`;
-      addItem(key, author || subject || "Office", body, "dom-office");
-    });
+  } else if (
+    host.includes("office.com") ||
+    host.includes("outlook.") ||
+    host.includes("office365.com") ||
+    host.includes("office365.us")
+  ) {
+    scanRows(
+      [
+        "div[role=\"option\"][data-convid]",
+        "div[data-convid]",
+        "[data-automationid=\"MessageListItem\"]",
+        "div[role=\"row\"]",
+        "div[role=\"article\"]"
+      ],
+      (row) => {
+        const author = firstText(row, [
+          "[data-automationid=\"MessageSender\"]",
+          "[data-app-section=\"Sender\"]",
+          ".ms-Persona-primaryText",
+          "[data-app-section=\"PersonaHeader\"] span",
+          "span[title*=\"@\"]"
+        ]);
+        const subject = firstText(row, [
+          "[data-automationid=\"MessageSubject\"]",
+          "[data-app-section=\"Subject\"]",
+          "[data-app-section=\"MailReadComposeSubjectLine\"]",
+          ".SubjectLine",
+          "[role=\"heading\"]"
+        ]);
+        const preview = firstText(row, [
+          "[data-automationid=\"MessagePreview\"]",
+          "[data-app-section=\"PreviewText\"]",
+          ".PreviewText",
+          ".wellItemBody"
+        ]);
+        const rowText = textFromNode(row).slice(0, 700);
+        const body = normalize(`${subject} ${preview} ${rowText}`);
+        const key =
+          row.getAttribute("data-convid") ||
+          row.getAttribute("data-item-id") ||
+          row.getAttribute("data-automationid") ||
+          row.id ||
+          `${author}|${subject}|${body.slice(0, 140)}`;
+        addItem(key, author || subject || "Office", body, "dom-office");
+      }
+    );
+
+    scanRows(
+      [
+        "[data-app-section=\"MailReadComposeBody\"]",
+        "[data-automationid=\"ReadPane\"] div[role=\"document\"]",
+        "div[aria-label*=\"Message body\"]",
+        "div[role=\"document\"]"
+      ],
+      (row) => {
+        const body = textFromNode(row);
+        if (body.length < 20) {
+          return;
+        }
+        const container =
+          row.closest("[data-app-section=\"ReadingPaneContainer\"], [data-automationid=\"ReadPane\"]") ||
+          row.parentElement ||
+          row;
+        const author = firstText(container, [
+          "[data-automationid=\"MessageSender\"]",
+          "[data-app-section=\"Sender\"]",
+          ".ms-Persona-primaryText",
+          "span[title*=\"@\"]"
+        ]);
+        const subject = firstText(container, [
+          "[data-automationid=\"MessageSubject\"]",
+          "[data-app-section=\"MailReadComposeSubjectLine\"]",
+          "[role=\"heading\"]"
+        ]);
+        const key =
+          container.getAttribute("data-convid") ||
+          container.getAttribute("data-item-id") ||
+          row.getAttribute("data-item-id") ||
+          `${author}|${subject}|${body.slice(0, 160)}`;
+        addItem(key, author || subject || "Office", `${subject} ${body}`.trim(), "dom-office-open");
+      }
+    );
   }
 
   if (items.length < 10) {
