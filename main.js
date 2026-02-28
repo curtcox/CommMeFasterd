@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const { app, BrowserWindow, BrowserView, ipcMain } = require("electron");
+const { collectCaptureFrameTargetsFromMainFrame } = require("./capture_frame_targets");
 
 let sqlite3 = null;
 try {
@@ -18,6 +19,7 @@ const MAX_HTTP_TRAFFIC = 1200;
 const MAX_SCREENSHOTS = 200;
 const DOM_CAPTURE_INTERVAL_MS = 6000;
 const MAX_DOM_CAPTURE_KEYS = 20000;
+const MAX_CAPTURE_FRAMES_PER_TAB = 16;
 
 const DB_TABLES = [
   "llm_settings",
@@ -456,6 +458,18 @@ function collectVisibleMessagesFromDom() {
 
 const DOM_CAPTURE_SCRIPT = `(${collectVisibleMessagesFromDom.toString()})();`;
 
+function collectCaptureFrameTargets(wc) {
+  return collectCaptureFrameTargetsFromMainFrame(wc && wc.mainFrame, MAX_CAPTURE_FRAMES_PER_TAB);
+}
+
+function hostFromUrl(rawUrl) {
+  try {
+    return new URL(rawUrl).hostname.toLowerCase();
+  } catch (_error) {
+    return "";
+  }
+}
+
 async function captureVisibleMessagesFromTab(tabId) {
   if (domCaptureInFlightTabs.has(tabId)) {
     return;
@@ -475,22 +489,35 @@ async function captureVisibleMessagesFromTab(tabId) {
 
   domCaptureInFlightTabs.add(tabId);
   try {
-    const result = await wc.executeJavaScript(DOM_CAPTURE_SCRIPT);
-    const candidates = result && Array.isArray(result.items) ? result.items : [];
-    for (const rawCandidate of candidates) {
-      const candidate = sanitizeCapturedMessageCandidate(rawCandidate || {});
-      if (!candidate.title && !candidate.body) {
+    const frames = collectCaptureFrameTargets(wc);
+    for (const frame of frames) {
+      let result = null;
+      try {
+        result = await frame.executeJavaScript(DOM_CAPTURE_SCRIPT);
+      } catch (_error) {
         continue;
       }
-      const dedupeKey = buildDomMessageDedupKey(tabId, candidate);
-      if (!rememberDomMessageKey(dedupeKey)) {
-        continue;
+
+      const candidates = result && Array.isArray(result.items) ? result.items : [];
+      const frameHost = hostFromUrl((result && result.url) || frame.url || url);
+      for (const rawCandidate of candidates) {
+        const candidate = sanitizeCapturedMessageCandidate(rawCandidate || {});
+        if (!candidate.title && !candidate.body) {
+          continue;
+        }
+        const sourceWithHost = frameHost
+          ? `${candidate.source || "dom-capture"}:${frameHost}`.slice(0, 120)
+          : candidate.source || "dom-capture";
+        const dedupeKey = buildDomMessageDedupKey(tabId, { ...candidate, source: sourceWithHost });
+        if (!rememberDomMessageKey(dedupeKey)) {
+          continue;
+        }
+        addMessage(tabId, {
+          title: candidate.title,
+          body: candidate.body,
+          source: sourceWithHost
+        });
       }
-      addMessage(tabId, {
-        title: candidate.title,
-        body: candidate.body,
-        source: candidate.source || "dom-capture"
-      });
     }
   } catch (_error) {
     // Ignore transient DOM extraction failures during navigation.
