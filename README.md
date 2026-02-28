@@ -30,6 +30,13 @@ npm install
 npm start
 ```
 
+## Outlook Capture Automation
+- UI: `Database` -> `Database Tools` -> `Outlook Capture Automation` -> `Run Outlook Capture Check`.
+- CLI: `npm run outlook:automation`
+  - On macOS this launches Electron via `open -na ... --args` and waits for the last-run log to update.
+- Last run log path: `<userData>/diagnostics/outlook-capture-last-run.json`
+  - The UI also shows the exact absolute path of the latest run log.
+
 ## Quick verification
 1. Launch app.
 2. Switch between Slack/Teams/Office/Gmail/Calendar tabs.

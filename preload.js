@@ -28,7 +28,9 @@ contextBridge.exposeInMainWorld("commMeFasterd", {
     listConsoleLogs: (payload) => ipcRenderer.invoke("diagnostics:list-console", payload),
     listHttpTraffic: (payload) => ipcRenderer.invoke("diagnostics:list-http", payload),
     listScreenshots: (payload) => ipcRenderer.invoke("diagnostics:list-screenshots", payload),
-    captureScreenshot: (payload) => ipcRenderer.invoke("diagnostics:capture-screenshot", payload)
+    captureScreenshot: (payload) => ipcRenderer.invoke("diagnostics:capture-screenshot", payload),
+    runOutlookCaptureAutomation: () => ipcRenderer.invoke("diagnostics:run-outlook-capture-automation"),
+    getLastOutlookCaptureAutomation: () => ipcRenderer.invoke("diagnostics:get-last-outlook-capture-automation")
   },
   database: {
     getOverview: () => ipcRenderer.invoke("database:overview"),

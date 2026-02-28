@@ -6,7 +6,8 @@
   "scripts": {
     "start": "electron .",
     "check": "node --check main.js && node --check preload.js && node --check renderer.js",
-    "test": "node --test"
+    "test": "node --test",
+    "outlook:automation": "node scripts/run-outlook-capture-automation.js"
   },
   "keywords": [
     "electron",

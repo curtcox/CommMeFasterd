@@ -199,6 +199,16 @@
           <div class="meta" id="diag-screenshot-meta">No screenshot captured this session.</div>
           <img id="diag-screenshot-preview" class="screenshot-preview hidden" alt="Latest screenshot preview" />
 
+          <h3>Outlook Capture Automation</h3>
+          <p>Runs an automated Outlook capture check and writes a detailed run log.</p>
+          <div class="inline-check">
+            <button id="diag-outlook-run" type="button">Run Outlook Capture Check</button>
+            <button id="diag-outlook-load-last" type="button">Load Last Run Log</button>
+          </div>
+          <div class="meta" id="diag-outlook-status">No Outlook capture run yet.</div>
+          <div class="meta">Last run log path: <code id="diag-outlook-log-path">(none)</code></div>
+          <pre id="diag-outlook-log" class="code-block"></pre>
+
           <form id="db-query-form">
             <label>
               Read-only SQL

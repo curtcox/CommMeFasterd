@@ -130,6 +130,11 @@ body {
   line-height: 1.4;
 }
 
+.database-view h3 {
+  margin: 8px 0 6px;
+  font-size: 13px;
+}
+
 .hidden {
   display: none;
 }

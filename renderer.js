@@ -60,7 +60,12 @@ const el = {
   diagScreenshotForm: document.getElementById("diag-screenshot-form"),
   diagScreenshotTab: document.getElementById("diag-screenshot-tab"),
   diagScreenshotMeta: document.getElementById("diag-screenshot-meta"),
-  diagScreenshotPreview: document.getElementById("diag-screenshot-preview")
+  diagScreenshotPreview: document.getElementById("diag-screenshot-preview"),
+  diagOutlookRun: document.getElementById("diag-outlook-run"),
+  diagOutlookLoadLast: document.getElementById("diag-outlook-load-last"),
+  diagOutlookStatus: document.getElementById("diag-outlook-status"),
+  diagOutlookLogPath: document.getElementById("diag-outlook-log-path"),
+  diagOutlookLog: document.getElementById("diag-outlook-log")
 };
 
 let currentActiveTab = "";
@@ -708,6 +713,32 @@ async function captureDiagnosticScreenshot() {
   }
 }
 
+function renderOutlookAutomationRun(run) {
+  if (!run) {
+    el.diagOutlookStatus.textContent = "No Outlook capture run found.";
+    el.diagOutlookLogPath.textContent = "(none)";
+    el.diagOutlookLog.textContent = "";
+    return;
+  }
+  el.diagOutlookStatus.textContent = `Outlook capture ${run.status || "unknown"} | started ${run.startedAt || "unknown"} | completed ${run.completedAt || "unknown"}`;
+  el.diagOutlookLogPath.textContent = run.lastLogPath || run.logPath || "(none)";
+  el.diagOutlookLog.textContent = JSON.stringify(run, null, 2);
+}
+
+async function loadLastOutlookCaptureAutomationRun() {
+  const run = await appApi.diagnostics.getLastOutlookCaptureAutomation();
+  renderOutlookAutomationRun(run);
+}
+
+async function runOutlookCaptureAutomation() {
+  el.diagOutlookStatus.textContent = "Running Outlook capture automation...";
+  const run = await appApi.diagnostics.runOutlookCaptureAutomation();
+  renderOutlookAutomationRun(run);
+  if (currentActiveTab === "database") {
+    await renderDbExplorer();
+  }
+}
+
 async function initializeForms() {
   el.llmForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -820,6 +851,14 @@ async function initializeForms() {
     event.preventDefault();
     await captureDiagnosticScreenshot();
   });
+
+  el.diagOutlookRun.addEventListener("click", async () => {
+    await runOutlookCaptureAutomation();
+  });
+
+  el.diagOutlookLoadLast.addEventListener("click", async () => {
+    await loadLastOutlookCaptureAutomationRun();
+  });
 }
 
 function registerRealtimeListeners() {
@@ -855,6 +894,7 @@ async function bootstrap() {
   await renderTriggerHistory();
   await renderScheduleInspection();
   await renderDbExplorer();
+  await loadLastOutlookCaptureAutomationRun();
   renderEvents(await appApi.automation.getRecentEvents());
   renderActiveState(await appApi.tabs.getActiveState());
 }

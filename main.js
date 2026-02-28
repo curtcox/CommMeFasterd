@@ -20,6 +20,10 @@ const MAX_SCREENSHOTS = 200;
 const DOM_CAPTURE_INTERVAL_MS = 6000;
 const MAX_DOM_CAPTURE_KEYS = 20000;
 const MAX_CAPTURE_FRAMES_PER_TAB = 16;
+const OUTLOOK_AUTOMATION_NAV_WAIT_MS = 20000;
+const OUTLOOK_AUTOMATION_POST_CLICK_WAIT_MS = 5000;
+const OUTLOOK_AUTOMATION_LAST_RUN_FILE = "outlook-capture-last-run.json";
+const OUTLOOK_AUTOMATION_AUTORUN_ARG = "--outlook-autorun";
 
 const DB_TABLES = [
   "llm_settings",
@@ -77,11 +81,14 @@ const webContentsToTabId = new Map();
 const pendingNetworkRequests = new Map();
 let activeTabId = "slack";
 let screenshotsDir = "";
+let diagnosticsDir = "";
 let networkObserversInstalled = false;
 let domCaptureIntervalHandle = null;
 const domCaptureInFlightTabs = new Set();
 const seenDomMessageKeys = new Set();
 const seenDomMessageKeyQueue = [];
+let outlookAutomationRunInFlight = null;
+let cachedLastOutlookAutomationRun = null;
 
 /** @type {import("sqlite3").Database | null} */
 let db = null;
@@ -119,6 +126,12 @@ function trimArraySize(arr, max) {
   if (arr.length > max) {
     arr.length = max;
   }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function normalizeDomCaptureKeyPart(value) {
@@ -470,35 +483,240 @@ function hostFromUrl(rawUrl) {
   }
 }
 
-async function captureVisibleMessagesFromTab(tabId) {
-  if (domCaptureInFlightTabs.has(tabId)) {
+const OUTLOOK_OPEN_FIRST_MESSAGE_SCRIPT = `(() => {
+  function isVisible(node) {
+    if (!node || typeof node.getBoundingClientRect !== "function") {
+      return false;
+    }
+    const style = window.getComputedStyle(node);
+    if (!style || style.display === "none" || style.visibility === "hidden" || Number(style.opacity || "1") === 0) {
+      return false;
+    }
+    const rect = node.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) {
+      return false;
+    }
+    return rect.bottom >= -50 && rect.top <= window.innerHeight + 50;
+  }
+
+  const selectors = [
+    "[data-automationid='MessageListItem']",
+    "div[role='row']",
+    "div[role='option'][data-convid]",
+    "div[data-convid]",
+    "tr[role='row']"
+  ];
+
+  for (const selector of selectors) {
+    const nodes = Array.from(document.querySelectorAll(selector));
+    for (const node of nodes) {
+      if (!isVisible(node)) {
+        continue;
+      }
+      try {
+        node.scrollIntoView({ block: "center", inline: "nearest" });
+      } catch (_error) {
+        // Ignore scroll issues.
+      }
+      node.click();
+      const text = String(node.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 220);
+      return {
+        clicked: true,
+        selector,
+        textSnippet: text
+      };
+    }
+  }
+
+  return {
+    clicked: false,
+    selector: "",
+    textSnippet: ""
+  };
+})();`;
+
+function isOutlookLikeMessageSource(source) {
+  const text = String(source || "").toLowerCase();
+  return text.includes("dom-office") || text.includes("outlook.");
+}
+
+function countOutlookCapturedMessagesInHistory() {
+  return messageHistory.filter((message) => message.tabId === "office" && isOutlookLikeMessageSource(message.source)).length;
+}
+
+function buildOutlookAutomationRun(reason) {
+  return {
+    id: newId("outlook_run"),
+    reason: reason || "manual",
+    startedAt: nowIso(),
+    completedAt: "",
+    status: "running",
+    summary: {},
+    steps: [],
+    logPath: ""
+  };
+}
+
+function pushOutlookAutomationStep(run, kind, details) {
+  run.steps.push({
+    at: nowIso(),
+    kind,
+    details: details || {}
+  });
+}
+
+function outlookLastRunPath() {
+  if (!diagnosticsDir) {
+    return "";
+  }
+  return path.join(diagnosticsDir, OUTLOOK_AUTOMATION_LAST_RUN_FILE);
+}
+
+function readLastOutlookAutomationRunFromDisk() {
+  const logPath = outlookLastRunPath();
+  if (!logPath || !fs.existsSync(logPath)) {
+    return null;
+  }
+  try {
+    return JSON.parse(fs.readFileSync(logPath, "utf8"));
+  } catch (_error) {
+    return null;
+  }
+}
+
+function persistOutlookAutomationRun(run) {
+  cachedLastOutlookAutomationRun = run;
+  if (!diagnosticsDir) {
     return;
+  }
+  try {
+    const timestamp = run.startedAt.replace(/[:.]/g, "-");
+    const runPath = path.join(diagnosticsDir, `outlook-capture-run-${timestamp}.json`);
+    const lastPath = outlookLastRunPath();
+    const body = JSON.stringify(run, null, 2);
+    fs.writeFileSync(runPath, body);
+    fs.writeFileSync(lastPath, body);
+    run.logPath = runPath;
+    run.lastLogPath = lastPath;
+  } catch (error) {
+    run.summary = {
+      ...(run.summary || {}),
+      logWriteError: error.message || "Failed writing run log"
+    };
+  }
+}
+
+async function waitForWebContentsIdle(wc, timeoutMs) {
+  const startedMs = Date.now();
+  while (Date.now() - startedMs < timeoutMs) {
+    if (!wc || wc.isDestroyed()) {
+      return { ok: false, reason: "webContents destroyed" };
+    }
+    if (!wc.isLoading()) {
+      return { ok: true, reason: "idle" };
+    }
+    await sleep(250);
+  }
+  return { ok: false, reason: `timed out after ${timeoutMs}ms` };
+}
+
+async function tryOpenOutlookMessageInTab(tabId) {
+  const view = tabViews.get(tabId);
+  if (!view || !view.webContents || view.webContents.isDestroyed()) {
+    return { clicked: false, error: "tab view unavailable", attempts: [] };
+  }
+  const frames = collectCaptureFrameTargets(view.webContents);
+  const attempts = [];
+  for (const frame of frames) {
+    const frameUrl = typeof frame.url === "string" ? frame.url : "";
+    try {
+      const result = await frame.executeJavaScript(OUTLOOK_OPEN_FIRST_MESSAGE_SCRIPT);
+      attempts.push({
+        frameUrl,
+        clicked: Boolean(result && result.clicked),
+        selector: (result && result.selector) || "",
+        textSnippet: (result && result.textSnippet) || ""
+      });
+      if (result && result.clicked) {
+        return { clicked: true, frameUrl, selector: result.selector || "", textSnippet: result.textSnippet || "", attempts };
+      }
+    } catch (error) {
+      attempts.push({
+        frameUrl,
+        clicked: false,
+        error: error.message || "executeJavaScript failed"
+      });
+    }
+  }
+  return { clicked: false, error: "no visible message row found", attempts };
+}
+
+async function captureVisibleMessagesFromTab(tabId, options = {}) {
+  const report = {
+    ok: false,
+    tabId,
+    trigger: options.trigger || "capture-loop",
+    startedAt: nowIso(),
+    completedAt: "",
+    tabUrl: "",
+    frameCount: 0,
+    candidateCount: 0,
+    insertedCount: 0,
+    duplicateCount: 0,
+    frameReports: [],
+    errors: []
+  };
+  if (domCaptureInFlightTabs.has(tabId)) {
+    report.errors.push("capture already in progress");
+    report.completedAt = nowIso();
+    return report;
   }
   const view = tabViews.get(tabId);
   if (!view) {
-    return;
+    report.errors.push("tab view not found");
+    report.completedAt = nowIso();
+    return report;
   }
   const wc = view.webContents;
   if (!wc || wc.isDestroyed() || wc.isLoading()) {
-    return;
+    report.errors.push("webContents unavailable or loading");
+    report.completedAt = nowIso();
+    return report;
   }
   const url = wc.getURL();
   if (!url || !/^https?:/i.test(url)) {
-    return;
+    report.errors.push(`unsupported url "${url || "(empty)"}"`);
+    report.completedAt = nowIso();
+    return report;
   }
+  report.tabUrl = url;
 
   domCaptureInFlightTabs.add(tabId);
   try {
     const frames = collectCaptureFrameTargets(wc);
+    report.frameCount = frames.length;
     for (const frame of frames) {
+      const frameReport = {
+        frameUrl: typeof frame.url === "string" ? frame.url : "",
+        resultUrl: "",
+        candidateCount: 0,
+        insertedCount: 0,
+        duplicateCount: 0,
+        error: ""
+      };
       let result = null;
       try {
         result = await frame.executeJavaScript(DOM_CAPTURE_SCRIPT);
       } catch (_error) {
+        frameReport.error = _error && _error.message ? _error.message : "executeJavaScript failed";
+        report.frameReports.push(frameReport);
         continue;
       }
 
       const candidates = result && Array.isArray(result.items) ? result.items : [];
+      frameReport.resultUrl = String((result && result.url) || "");
+      frameReport.candidateCount = candidates.length;
+      report.candidateCount += candidates.length;
       const frameHost = hostFromUrl((result && result.url) || frame.url || url);
       for (const rawCandidate of candidates) {
         const candidate = sanitizeCapturedMessageCandidate(rawCandidate || {});
@@ -510,6 +728,8 @@ async function captureVisibleMessagesFromTab(tabId) {
           : candidate.source || "dom-capture";
         const dedupeKey = buildDomMessageDedupKey(tabId, { ...candidate, source: sourceWithHost });
         if (!rememberDomMessageKey(dedupeKey)) {
+          frameReport.duplicateCount += 1;
+          report.duplicateCount += 1;
           continue;
         }
         addMessage(tabId, {
@@ -517,13 +737,119 @@ async function captureVisibleMessagesFromTab(tabId) {
           body: candidate.body,
           source: sourceWithHost
         });
+        frameReport.insertedCount += 1;
+        report.insertedCount += 1;
       }
+      report.frameReports.push(frameReport);
     }
+    report.ok = true;
   } catch (_error) {
-    // Ignore transient DOM extraction failures during navigation.
+    report.errors.push(_error && _error.message ? _error.message : "capture failed");
   } finally {
+    report.completedAt = nowIso();
     domCaptureInFlightTabs.delete(tabId);
   }
+  return report;
+}
+
+async function runOutlookCaptureAutomation(reason) {
+  if (outlookAutomationRunInFlight) {
+    return outlookAutomationRunInFlight;
+  }
+
+  const runPromise = (async () => {
+    const run = buildOutlookAutomationRun(reason);
+    try {
+      pushOutlookAutomationStep(run, "start", {
+        activeTabId,
+        hasMainWindow: Boolean(mainWindow),
+        diagnosticsDir: diagnosticsDir || "(not initialized)"
+      });
+
+      const officeView = tabViews.get("office");
+      if (!officeView || !officeView.webContents || officeView.webContents.isDestroyed()) {
+        run.status = "failed";
+        run.summary = { error: "Office tab view is not available." };
+        pushOutlookAutomationStep(run, "failed", run.summary);
+        run.completedAt = nowIso();
+        persistOutlookAutomationRun(run);
+        return run;
+      }
+
+      switchToTab("office");
+      pushOutlookAutomationStep(run, "switch-tab", {
+        switchedTo: "office",
+        officeUrl: officeView.webContents.getURL()
+      });
+
+      const idleResult = await waitForWebContentsIdle(officeView.webContents, OUTLOOK_AUTOMATION_NAV_WAIT_MS);
+      pushOutlookAutomationStep(run, "wait-idle", idleResult);
+
+      const beforeCount = countOutlookCapturedMessagesInHistory();
+      pushOutlookAutomationStep(run, "before-count", { beforeCount });
+
+      const preClickCapture = await captureVisibleMessagesFromTab("office", { trigger: "automation-pre-click" });
+      pushOutlookAutomationStep(run, "capture-pre-click", preClickCapture);
+
+      const clickResult = await tryOpenOutlookMessageInTab("office");
+      pushOutlookAutomationStep(run, "open-first-message", clickResult);
+
+      if (clickResult.clicked) {
+        await sleep(OUTLOOK_AUTOMATION_POST_CLICK_WAIT_MS);
+        pushOutlookAutomationStep(run, "wait-post-click", { waitedMs: OUTLOOK_AUTOMATION_POST_CLICK_WAIT_MS });
+      }
+
+      const postClickCapture = await captureVisibleMessagesFromTab("office", { trigger: "automation-post-click" });
+      pushOutlookAutomationStep(run, "capture-post-click", postClickCapture);
+
+      const afterCount = countOutlookCapturedMessagesInHistory();
+      const delta = afterCount - beforeCount;
+      const insertedTotal =
+        Number(preClickCapture.insertedCount || 0) + Number(postClickCapture.insertedCount || 0);
+
+      run.summary = {
+        beforeCount,
+        afterCount,
+        delta,
+        clickedMessage: Boolean(clickResult.clicked),
+        insertedTotal,
+        officeUrl: officeView.webContents.getURL(),
+        officeTitle: officeView.webContents.getTitle()
+      };
+      run.status = delta > 0 || insertedTotal > 0 ? "passed" : "failed";
+      pushOutlookAutomationStep(run, "summary", run.summary);
+    } catch (error) {
+      run.status = "failed";
+      run.summary = { error: error.message || "Automation failed unexpectedly." };
+      pushOutlookAutomationStep(run, "exception", run.summary);
+    }
+
+    run.completedAt = nowIso();
+    persistOutlookAutomationRun(run);
+    return run;
+  })();
+
+  outlookAutomationRunInFlight = runPromise;
+  try {
+    return await runPromise;
+  } finally {
+    outlookAutomationRunInFlight = null;
+  }
+}
+
+function getLastOutlookAutomationRun() {
+  if (cachedLastOutlookAutomationRun) {
+    return cachedLastOutlookAutomationRun;
+  }
+  const run = readLastOutlookAutomationRunFromDisk();
+  if (run) {
+    cachedLastOutlookAutomationRun = run;
+  }
+  return run;
+}
+
+function shouldAutoRunOutlookAutomation() {
+  return process.argv.includes(OUTLOOK_AUTOMATION_AUTORUN_ARG) || process.env.COMMMEFASTERD_OUTLOOK_AUTORUN === "1";
 }
 
 function requestVisibleMessageCapture(tabId) {
@@ -2133,6 +2459,12 @@ function wireIpcHandlers() {
   ipcMain.handle("diagnostics:capture-screenshot", async (_event, payload) =>
     captureScreenshotForTab((payload && payload.tabId) || "")
   );
+  ipcMain.handle("diagnostics:run-outlook-capture-automation", async () =>
+    runOutlookCaptureAutomation("manual")
+  );
+  ipcMain.handle("diagnostics:get-last-outlook-capture-automation", async () =>
+    getLastOutlookAutomationRun()
+  );
 
   ipcMain.handle("database:overview", async () => databaseOverview());
   ipcMain.handle("database:table-rows", async (_event, payload) =>
@@ -2173,6 +2505,8 @@ app.whenReady().then(async () => {
   try {
     screenshotsDir = path.join(app.getPath("userData"), "screenshots");
     fs.mkdirSync(screenshotsDir, { recursive: true });
+    diagnosticsDir = path.join(app.getPath("userData"), "diagnostics");
+    fs.mkdirSync(diagnosticsDir, { recursive: true });
     await initDatabase();
     await loadStateFromDb();
   } catch (error) {
@@ -2182,6 +2516,14 @@ app.whenReady().then(async () => {
 
   wireIpcHandlers();
   createMainWindow();
+
+  if (shouldAutoRunOutlookAutomation()) {
+    const run = await runOutlookCaptureAutomation("autorun");
+    console.log(`[outlook-capture-automation] status=${run.status} log=${run.logPath || "(none)"}`);
+    setTimeout(() => {
+      app.quit();
+    }, 250);
+  }
 });
 
 app.on("window-all-closed", () => {
