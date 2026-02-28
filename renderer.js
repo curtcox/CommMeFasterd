@@ -45,6 +45,7 @@ const el = {
 
   dbPath: document.getElementById("db-path"),
   dbRowLimit: document.getElementById("db-row-limit"),
+  dbFilter: document.getElementById("db-filter"),
   dbRefresh: document.getElementById("db-refresh"),
   dbViewTabs: document.getElementById("db-view-tabs"),
   dbExplorerView: document.getElementById("db-explorer-view"),
@@ -69,6 +70,9 @@ let dbTables = [];
 let dbCounts = {};
 let activeDbTable = "";
 let activeDatabaseView = "explorer";
+let activeDbColumns = [];
+let activeDbRows = [];
+let activeDbSort = { column: "", direction: "asc" };
 
 function tabButtonClass(tabId) {
   return tabId === currentActiveTab ? "tab-button is-active" : "tab-button";
@@ -462,6 +466,146 @@ function getDbRowLimit() {
   return Math.max(1, Math.min(500, Number(el.dbRowLimit.value) || 50));
 }
 
+function normalizeDbCellValue(value) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  if (typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch (_error) {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
+function compareDbValues(left, right) {
+  if (left === right) {
+    return 0;
+  }
+  if (left === null || left === undefined) {
+    return 1;
+  }
+  if (right === null || right === undefined) {
+    return -1;
+  }
+  if (typeof left === "number" && typeof right === "number") {
+    return left - right;
+  }
+  if (typeof left === "boolean" && typeof right === "boolean") {
+    return Number(left) - Number(right);
+  }
+  return normalizeDbCellValue(left).localeCompare(normalizeDbCellValue(right), undefined, {
+    numeric: true,
+    sensitivity: "base"
+  });
+}
+
+function setDbTableMessage(message) {
+  el.dbTableResult.innerHTML = "";
+  const empty = document.createElement("div");
+  empty.className = "db-table-empty";
+  empty.textContent = message;
+  el.dbTableResult.appendChild(empty);
+}
+
+function filteredAndSortedDbRows() {
+  const query = el.dbFilter.value.trim().toLowerCase();
+  let rows = activeDbRows;
+
+  if (query) {
+    rows = rows.filter((row) =>
+      activeDbColumns.some((column) => normalizeDbCellValue(row[column]).toLowerCase().includes(query))
+    );
+  }
+
+  if (activeDbSort.column && activeDbColumns.includes(activeDbSort.column)) {
+    rows = rows.slice().sort((leftRow, rightRow) => {
+      const base = compareDbValues(leftRow[activeDbSort.column], rightRow[activeDbSort.column]);
+      return activeDbSort.direction === "asc" ? base : -base;
+    });
+  }
+
+  return { query, rows };
+}
+
+function handleDbSortColumnClick(column) {
+  if (activeDbSort.column === column) {
+    activeDbSort.direction = activeDbSort.direction === "asc" ? "desc" : "asc";
+  } else {
+    activeDbSort.column = column;
+    activeDbSort.direction = "asc";
+  }
+  renderDbTableGrid();
+}
+
+function renderDbTableGrid() {
+  const total = dbCounts[activeDbTable];
+  const loaded = activeDbRows.length;
+  const { query, rows } = filteredAndSortedDbRows();
+  const filtered = rows.length;
+  const sortText = activeDbSort.column ? ` | sorted ${activeDbSort.column} ${activeDbSort.direction}` : "";
+  const filterText = query ? ` | filtered ${filtered} row(s)` : "";
+  el.dbTableMeta.textContent = `${activeDbTable} | loaded ${loaded} row(s) | total ${total ?? "unknown"} row(s)${filterText}${sortText}`;
+
+  if (activeDbColumns.length === 0) {
+    setDbTableMessage("No rows found for this table.");
+    return;
+  }
+
+  if (filtered === 0) {
+    setDbTableMessage(query ? "No rows match the current search." : "No rows found for this table.");
+    return;
+  }
+
+  el.dbTableResult.innerHTML = "";
+  const table = document.createElement("table");
+  table.className = "db-table-grid";
+
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  activeDbColumns.forEach((column) => {
+    const th = document.createElement("th");
+    const isActiveSort = activeDbSort.column === column;
+    th.setAttribute("aria-sort", isActiveSort ? (activeDbSort.direction === "asc" ? "ascending" : "descending") : "none");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "db-sort-button";
+    const sortIndicator = isActiveSort ? (activeDbSort.direction === "asc" ? " (asc)" : " (desc)") : "";
+    button.textContent = `${column}${sortIndicator}`;
+    button.addEventListener("click", () => {
+      handleDbSortColumnClick(column);
+    });
+    th.appendChild(button);
+    headRow.appendChild(th);
+  });
+  head.appendChild(headRow);
+  table.appendChild(head);
+
+  const body = document.createElement("tbody");
+  rows.forEach((row) => {
+    const tr = document.createElement("tr");
+    activeDbColumns.forEach((column) => {
+      const td = document.createElement("td");
+      const rawValue = row[column];
+      if (rawValue === null || rawValue === undefined) {
+        const nullText = document.createElement("span");
+        nullText.className = "db-cell-null";
+        nullText.textContent = "null";
+        td.appendChild(nullText);
+      } else {
+        td.textContent = normalizeDbCellValue(rawValue);
+      }
+      tr.appendChild(td);
+    });
+    body.appendChild(tr);
+  });
+  table.appendChild(body);
+
+  el.dbTableResult.appendChild(table);
+}
+
 function renderDbSubtabs() {
   el.dbSubtabs.innerHTML = "";
   dbTables.forEach((table) => {
@@ -481,29 +625,27 @@ function renderDbSubtabs() {
 async function renderActiveDbTable() {
   if (!activeDbTable) {
     el.dbTableMeta.textContent = "No table selected.";
-    el.dbTableResult.textContent = "";
+    activeDbColumns = [];
+    activeDbRows = [];
+    setDbTableMessage("No table selected.");
     return;
   }
 
   const result = await appApi.database.getTableRows({ table: activeDbTable, limit: getDbRowLimit() });
   if (!result.ok) {
     el.dbTableMeta.textContent = `Error loading ${activeDbTable}: ${result.error}`;
-    el.dbTableResult.textContent = "";
+    activeDbColumns = [];
+    activeDbRows = [];
+    setDbTableMessage("Unable to load this table.");
     return;
   }
 
-  const total = dbCounts[activeDbTable];
-  const displayed = result.rows.length;
-  el.dbTableMeta.textContent = `${activeDbTable} | showing ${displayed} row(s) | total ${total ?? "unknown"} row(s)`;
-  el.dbTableResult.textContent = JSON.stringify(
-    {
-      table: activeDbTable,
-      columns: result.columns,
-      rows: result.rows
-    },
-    null,
-    2
-  );
+  activeDbColumns = Array.isArray(result.columns) ? result.columns : [];
+  activeDbRows = Array.isArray(result.rows) ? result.rows : [];
+  if (!activeDbColumns.includes(activeDbSort.column)) {
+    activeDbSort = { column: "", direction: "asc" };
+  }
+  renderDbTableGrid();
 }
 
 async function renderDbExplorer() {
@@ -511,7 +653,9 @@ async function renderDbExplorer() {
   if (!overview.ok) {
     el.dbPath.textContent = overview.dbPath || "(unavailable)";
     el.dbTableMeta.textContent = overview.error || "Database not ready.";
-    el.dbTableResult.textContent = "";
+    activeDbColumns = [];
+    activeDbRows = [];
+    setDbTableMessage("Database not ready.");
     el.dbSubtabs.innerHTML = "";
     return;
   }
@@ -658,6 +802,12 @@ async function initializeForms() {
   el.dbRowLimit.addEventListener("change", async () => {
     if (currentActiveTab === "database") {
       await renderActiveDbTable();
+    }
+  });
+
+  el.dbFilter.addEventListener("input", () => {
+    if (currentActiveTab === "database" && activeDatabaseView === "explorer") {
+      renderDbTableGrid();
     }
   });
 

@@ -171,16 +171,20 @@
           <h2>Database Explorer</h2>
           <p>Use sub-tabs to inspect one database table at a time.</p>
           <div><strong>Path:</strong> <code id="db-path">(loading)</code></div>
-          <div class="inline-check">
+          <div class="db-toolbar">
             <label>
               Row limit
               <input id="db-row-limit" type="number" min="1" max="500" value="50" />
+            </label>
+            <label>
+              Search all fields
+              <input id="db-filter" type="text" placeholder="Type to filter rows..." />
             </label>
             <button id="db-refresh" type="button">Refresh Selected Table</button>
           </div>
           <nav id="db-subtabs" class="tabs" aria-label="Database table sub-tabs"></nav>
           <div class="meta" id="db-table-meta"></div>
-          <pre id="db-table-result" class="code-block db-result-block"></pre>
+          <div id="db-table-result" class="db-table-container"></div>
         </section>
 
         <section id="db-tools-view" class="database-view hidden">
