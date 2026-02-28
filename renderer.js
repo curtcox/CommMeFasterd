@@ -46,6 +46,9 @@ const el = {
   dbPath: document.getElementById("db-path"),
   dbRowLimit: document.getElementById("db-row-limit"),
   dbRefresh: document.getElementById("db-refresh"),
+  dbViewTabs: document.getElementById("db-view-tabs"),
+  dbExplorerView: document.getElementById("db-explorer-view"),
+  dbToolsView: document.getElementById("db-tools-view"),
   dbSubtabs: document.getElementById("db-subtabs"),
   dbTableMeta: document.getElementById("db-table-meta"),
   dbTableResult: document.getElementById("db-table-result"),
@@ -65,6 +68,7 @@ let triggerCache = [];
 let dbTables = [];
 let dbCounts = {};
 let activeDbTable = "";
+let activeDatabaseView = "explorer";
 
 function tabButtonClass(tabId) {
   return tabId === currentActiveTab ? "tab-button is-active" : "tab-button";
@@ -72,6 +76,16 @@ function tabButtonClass(tabId) {
 
 function dbSubtabClass(table) {
   return table === activeDbTable ? "tab-button is-active" : "tab-button";
+}
+
+function setActiveDatabaseView(view) {
+  activeDatabaseView = view === "tools" ? "tools" : "explorer";
+  const buttons = el.dbViewTabs.querySelectorAll("button[data-db-view]");
+  buttons.forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.dbView === activeDatabaseView);
+  });
+  el.dbExplorerView.classList.toggle("hidden", activeDatabaseView !== "explorer");
+  el.dbToolsView.classList.toggle("hidden", activeDatabaseView !== "tools");
 }
 
 function tableWithCountLabel(table) {
@@ -633,6 +647,14 @@ async function initializeForms() {
     await renderDbExplorer();
   });
 
+  el.dbViewTabs.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-db-view]");
+    if (!button) {
+      return;
+    }
+    setActiveDatabaseView(button.dataset.dbView);
+  });
+
   el.dbRowLimit.addEventListener("change", async () => {
     if (currentActiveTab === "database") {
       await renderActiveDbTable();
@@ -673,6 +695,7 @@ function registerRealtimeListeners() {
 
 async function bootstrap() {
   setDefaultInspectionTime();
+  setActiveDatabaseView(activeDatabaseView);
   await renderTabStrip();
   registerRealtimeListeners();
   await initializeForms();

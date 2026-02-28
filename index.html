@@ -160,43 +160,50 @@
       </section>
     </main>
 
-    <main id="database-panel" class="settings hidden">
-      <section class="settings-card">
-        <h2>Database Explorer</h2>
-        <p>Use sub-tabs to inspect one database table at a time.</p>
-        <div><strong>Path:</strong> <code id="db-path">(loading)</code></div>
-        <div class="inline-check">
-          <label>
-            Row limit
-            <input id="db-row-limit" type="number" min="1" max="500" value="50" />
-          </label>
-          <button id="db-refresh" type="button">Refresh Selected Table</button>
-        </div>
-        <nav id="db-subtabs" class="tabs" aria-label="Database table sub-tabs"></nav>
-        <div class="meta" id="db-table-meta"></div>
-        <pre id="db-table-result" class="code-block"></pre>
-      </section>
+    <main id="database-panel" class="database hidden">
+      <section class="database-shell">
+        <nav id="db-view-tabs" class="tabs" aria-label="Database view tabs">
+          <button type="button" class="tab-button is-active" data-db-view="explorer">Database Explorer</button>
+          <button type="button" class="tab-button" data-db-view="tools">Database Tools</button>
+        </nav>
 
-      <section class="settings-card">
-        <h2>Database Tools</h2>
-        <form id="diag-screenshot-form">
-          <label>
-            Capture screenshot from tab
-            <select id="diag-screenshot-tab"></select>
-          </label>
-          <button type="submit">Capture Screenshot</button>
-        </form>
-        <div class="meta" id="diag-screenshot-meta">No screenshot captured this session.</div>
-        <img id="diag-screenshot-preview" class="screenshot-preview hidden" alt="Latest screenshot preview" />
+        <section id="db-explorer-view" class="database-view">
+          <h2>Database Explorer</h2>
+          <p>Use sub-tabs to inspect one database table at a time.</p>
+          <div><strong>Path:</strong> <code id="db-path">(loading)</code></div>
+          <div class="inline-check">
+            <label>
+              Row limit
+              <input id="db-row-limit" type="number" min="1" max="500" value="50" />
+            </label>
+            <button id="db-refresh" type="button">Refresh Selected Table</button>
+          </div>
+          <nav id="db-subtabs" class="tabs" aria-label="Database table sub-tabs"></nav>
+          <div class="meta" id="db-table-meta"></div>
+          <pre id="db-table-result" class="code-block db-result-block"></pre>
+        </section>
 
-        <form id="db-query-form">
-          <label>
-            Read-only SQL
-            <textarea id="db-sql" rows="6" placeholder="SELECT * FROM messages ORDER BY created_at DESC LIMIT 20;"></textarea>
-          </label>
-          <button type="submit">Run Query</button>
-        </form>
-        <pre id="db-query-result" class="code-block"></pre>
+        <section id="db-tools-view" class="database-view hidden">
+          <h2>Database Tools</h2>
+          <form id="diag-screenshot-form">
+            <label>
+              Capture screenshot from tab
+              <select id="diag-screenshot-tab"></select>
+            </label>
+            <button type="submit">Capture Screenshot</button>
+          </form>
+          <div class="meta" id="diag-screenshot-meta">No screenshot captured this session.</div>
+          <img id="diag-screenshot-preview" class="screenshot-preview hidden" alt="Latest screenshot preview" />
+
+          <form id="db-query-form">
+            <label>
+              Read-only SQL
+              <textarea id="db-sql" rows="6" placeholder="SELECT * FROM messages ORDER BY created_at DESC LIMIT 20;"></textarea>
+            </label>
+            <button type="submit">Run Query</button>
+          </form>
+          <pre id="db-query-result" class="code-block db-result-block"></pre>
+        </section>
       </section>
     </main>
 
