@@ -65,7 +65,12 @@ const el = {
   diagOutlookLoadLast: document.getElementById("diag-outlook-load-last"),
   diagOutlookStatus: document.getElementById("diag-outlook-status"),
   diagOutlookLogPath: document.getElementById("diag-outlook-log-path"),
-  diagOutlookLog: document.getElementById("diag-outlook-log")
+  diagOutlookLog: document.getElementById("diag-outlook-log"),
+  diagTeamsRun: document.getElementById("diag-teams-run"),
+  diagTeamsLoadLast: document.getElementById("diag-teams-load-last"),
+  diagTeamsStatus: document.getElementById("diag-teams-status"),
+  diagTeamsLogPath: document.getElementById("diag-teams-log-path"),
+  diagTeamsLog: document.getElementById("diag-teams-log")
 };
 
 let currentActiveTab = "";
@@ -725,15 +730,41 @@ function renderOutlookAutomationRun(run) {
   el.diagOutlookLog.textContent = JSON.stringify(run, null, 2);
 }
 
+function renderTeamsAutomationRun(run) {
+  if (!run) {
+    el.diagTeamsStatus.textContent = "No Teams capture run found.";
+    el.diagTeamsLogPath.textContent = "(none)";
+    el.diagTeamsLog.textContent = "";
+    return;
+  }
+  el.diagTeamsStatus.textContent = `Teams capture ${run.status || "unknown"} | started ${run.startedAt || "unknown"} | completed ${run.completedAt || "unknown"}`;
+  el.diagTeamsLogPath.textContent = run.lastLogPath || run.logPath || "(none)";
+  el.diagTeamsLog.textContent = JSON.stringify(run, null, 2);
+}
+
 async function loadLastOutlookCaptureAutomationRun() {
   const run = await appApi.diagnostics.getLastOutlookCaptureAutomation();
   renderOutlookAutomationRun(run);
+}
+
+async function loadLastTeamsCaptureAutomationRun() {
+  const run = await appApi.diagnostics.getLastTeamsCaptureAutomation();
+  renderTeamsAutomationRun(run);
 }
 
 async function runOutlookCaptureAutomation() {
   el.diagOutlookStatus.textContent = "Running Outlook capture automation...";
   const run = await appApi.diagnostics.runOutlookCaptureAutomation();
   renderOutlookAutomationRun(run);
+  if (currentActiveTab === "database") {
+    await renderDbExplorer();
+  }
+}
+
+async function runTeamsCaptureAutomation() {
+  el.diagTeamsStatus.textContent = "Running Teams capture automation...";
+  const run = await appApi.diagnostics.runTeamsCaptureAutomation();
+  renderTeamsAutomationRun(run);
   if (currentActiveTab === "database") {
     await renderDbExplorer();
   }
@@ -859,6 +890,14 @@ async function initializeForms() {
   el.diagOutlookLoadLast.addEventListener("click", async () => {
     await loadLastOutlookCaptureAutomationRun();
   });
+
+  el.diagTeamsRun.addEventListener("click", async () => {
+    await runTeamsCaptureAutomation();
+  });
+
+  el.diagTeamsLoadLast.addEventListener("click", async () => {
+    await loadLastTeamsCaptureAutomationRun();
+  });
 }
 
 function registerRealtimeListeners() {
@@ -895,6 +934,7 @@ async function bootstrap() {
   await renderScheduleInspection();
   await renderDbExplorer();
   await loadLastOutlookCaptureAutomationRun();
+  await loadLastTeamsCaptureAutomationRun();
   renderEvents(await appApi.automation.getRecentEvents());
   renderActiveState(await appApi.tabs.getActiveState());
 }

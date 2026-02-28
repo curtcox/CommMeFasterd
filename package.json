@@ -5,9 +5,11 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "check": "node --check main.js && node --check preload.js && node --check renderer.js",
+    "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check scripts/capture-automation-runner.js && node --check scripts/run-outlook-capture-automation.js && node --check scripts/run-teams-capture-automation.js && node --check scripts/run-teams-diagnose.js",
     "test": "node --test",
-    "outlook:automation": "node scripts/run-outlook-capture-automation.js"
+    "outlook:automation": "node scripts/run-outlook-capture-automation.js",
+    "teams:automation": "node scripts/run-teams-capture-automation.js",
+    "teams:diagnose": "node scripts/run-teams-diagnose.js"
   },
   "keywords": [
     "electron",

@@ -12,6 +12,11 @@ test("keeps existing Teams web app URLs", () => {
   assert.equal(resolveTeamsWebUrl(url), url);
 });
 
+test("routes Teams error pages back to Teams web app", () => {
+  const url = "https://teams.microsoft.com/error/eoa";
+  assert.equal(resolveTeamsWebUrl(url), "https://teams.microsoft.com/v2/");
+});
+
 test("routes teams.live.com URLs to Teams web app", () => {
   const url = "https://teams.live.com/_#/conversations/19:abc@thread.v2";
   assert.equal(resolveTeamsWebUrl(url), "https://teams.microsoft.com/v2/");

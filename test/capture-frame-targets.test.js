@@ -35,3 +35,16 @@ test("deduplicates repeated routing IDs", () => {
   const targets = collectCaptureFrameTargetsFromMainFrame(mainFrame, 16);
   assert.equal(targets.length, 1);
 });
+
+test("keeps non-http app frames while excluding devtools frames", () => {
+  const mainFrame = {
+    framesInSubtree: [
+      makeFrame({ routingId: 11, url: "chrome-untrusted://teams-frame/" }),
+      makeFrame({ routingId: 12, url: "devtools://devtools/bundled/inspector.html" })
+    ]
+  };
+
+  const targets = collectCaptureFrameTargetsFromMainFrame(mainFrame, 16);
+  const urls = targets.map((frame) => frame.url);
+  assert.deepEqual(urls, ["chrome-untrusted://teams-frame/"]);
+});

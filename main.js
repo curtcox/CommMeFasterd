@@ -3,6 +3,17 @@ const path = require("path");
 const { app, BrowserWindow, BrowserView, ipcMain } = require("electron");
 const { collectCaptureFrameTargetsFromMainFrame } = require("./capture_frame_targets");
 const { resolveOutlookMailUrl } = require("./outlook_target_url");
+const { resolveTeamsWebUrl } = require("./teams_target_url");
+const USER_DATA_DIR_OVERRIDE = String(process.env.COMMMEFASTERD_USER_DATA_DIR || "").trim();
+
+if (USER_DATA_DIR_OVERRIDE) {
+  try {
+    fs.mkdirSync(USER_DATA_DIR_OVERRIDE, { recursive: true });
+    app.setPath("userData", path.resolve(USER_DATA_DIR_OVERRIDE));
+  } catch (error) {
+    console.error(`[startup] failed to apply COMMMEFASTERD_USER_DATA_DIR override: ${error.message || String(error)}`);
+  }
+}
 
 let sqlite3 = null;
 try {
@@ -23,8 +34,11 @@ const MAX_DOM_CAPTURE_KEYS = 20000;
 const MAX_CAPTURE_FRAMES_PER_TAB = 16;
 const OUTLOOK_AUTOMATION_NAV_WAIT_MS = 20000;
 const OUTLOOK_AUTOMATION_POST_CLICK_WAIT_MS = 5000;
+const TEAMS_AUTOMATION_CONTENT_WAIT_MS = 30000;
 const OUTLOOK_AUTOMATION_LAST_RUN_FILE = "outlook-capture-last-run.json";
 const OUTLOOK_AUTOMATION_AUTORUN_ARG = "--outlook-autorun";
+const TEAMS_AUTOMATION_LAST_RUN_FILE = "teams-capture-last-run.json";
+const TEAMS_AUTOMATION_AUTORUN_ARG = "--teams-autorun";
 
 const DB_TABLES = [
   "llm_settings",
@@ -54,7 +68,7 @@ const DB_TABLE_SORT = {
 
 const TABS = [
   { id: "slack", label: "Slack", url: "https://app.slack.com/client", type: "web" },
-  { id: "teams", label: "Teams", url: "https://teams.microsoft.com", type: "web" },
+  { id: "teams", label: "Teams", url: "https://teams.microsoft.com/v2/", type: "web" },
   { id: "office", label: "Office", url: "https://outlook.office.com/mail/", type: "web" },
   { id: "gmail", label: "Gmail", url: "https://mail.google.com", type: "web" },
   { id: "calendar", label: "Google Calendar", url: "https://calendar.google.com", type: "web" },
@@ -88,8 +102,12 @@ let domCaptureIntervalHandle = null;
 const domCaptureInFlightTabs = new Set();
 const seenDomMessageKeys = new Set();
 const seenDomMessageKeyQueue = [];
+const pendingDbWritePromises = new Set();
+let shuttingDownForQuit = false;
 let outlookAutomationRunInFlight = null;
 let cachedLastOutlookAutomationRun = null;
+let teamsAutomationRunInFlight = null;
+let cachedLastTeamsAutomationRun = null;
 
 /** @type {import("sqlite3").Database | null} */
 let db = null;
@@ -194,6 +212,35 @@ function collectVisibleMessagesFromDom() {
     }
   }
 
+  const host = String(location.hostname || "").toLowerCase();
+
+  function buildQueryRoots() {
+    const includeShadowRoots = host.includes("teams.microsoft.com");
+    const roots = documents.slice();
+    if (!includeShadowRoots) {
+      return roots;
+    }
+    const seenRoots = new Set(roots);
+    for (let index = 0; index < roots.length; index += 1) {
+      const root = roots[index];
+      let nodes = [];
+      try {
+        nodes = Array.from(root.querySelectorAll("*"));
+      } catch (_error) {
+        nodes = [];
+      }
+      for (const node of nodes) {
+        if (node && node.shadowRoot && !seenRoots.has(node.shadowRoot)) {
+          seenRoots.add(node.shadowRoot);
+          roots.push(node.shadowRoot);
+        }
+      }
+    }
+    return roots;
+  }
+
+  const queryRoots = buildQueryRoots();
+
   function normalize(text) {
     return String(text || "")
       .replace(/\s+/g, " ")
@@ -218,10 +265,23 @@ function collectVisibleMessagesFromDom() {
     return "";
   }
 
-  function queryAllAcrossDocuments(selector) {
+  function queryAllAcrossRoots(selector) {
     const nodes = [];
-    for (const doc of documents) {
-      nodes.push(...Array.from(doc.querySelectorAll(selector)));
+    const seenNodes = new Set();
+    for (const root of queryRoots) {
+      let matches = [];
+      try {
+        matches = Array.from(root.querySelectorAll(selector));
+      } catch (_error) {
+        matches = [];
+      }
+      for (const match of matches) {
+        if (seenNodes.has(match)) {
+          continue;
+        }
+        seenNodes.add(match);
+        nodes.push(match);
+      }
     }
     return nodes;
   }
@@ -265,7 +325,7 @@ function collectVisibleMessagesFromDom() {
 
   function scanRows(selectors, parser) {
     for (const selector of selectors) {
-      const nodes = queryAllAcrossDocuments(selector);
+      const nodes = queryAllAcrossRoots(selector);
       for (const node of nodes) {
         if (items.length >= MAX_ITEMS) {
           return;
@@ -277,8 +337,6 @@ function collectVisibleMessagesFromDom() {
       }
     }
   }
-
-  const host = String(location.hostname || "").toLowerCase();
 
   if (host.includes("slack.com")) {
     scanRows(["[data-qa=\"message_container\"]", ".c-message_kit__background"], (row) => {
@@ -305,42 +363,98 @@ function collectVisibleMessagesFromDom() {
     });
   } else if (host.includes("teams.microsoft.com")) {
     scanRows(
-      ["[data-tid=\"chat-pane-message\"]", "[data-tid=\"message-thread-message\"]", "[data-tid=\"chat-pane-list-item\"]"],
+      [
+        "[data-tid=\"chat-pane-message\"]",
+        "[data-tid=\"message-thread-message\"]",
+        "[data-tid=\"chat-pane-list-item\"]",
+        "[id^=\"chat-pane-item_\"]",
+        "[data-item-id][role=\"listitem\"]",
+        "[role=\"listitem\"][data-tid]",
+        "[data-tid*=\"message\" i]",
+        "[data-tid*=\"chat\" i]",
+        "[data-tid*=\"thread\" i]",
+        "[data-testid*=\"message\" i]",
+        "[data-testid*=\"chat\" i]",
+        "[data-item-id]"
+      ],
       (row) => {
+        const rowText = textFromNode(row);
+        if (!rowText || rowText.length < 6 || rowText.length > 3500) {
+          return;
+        }
+        const rowTid = normalize(row.getAttribute("data-tid") || "");
+        const hasMessageHint =
+          /message|chat|chat-pane|thread|conversation/i.test(rowTid) ||
+          Boolean(
+            row.querySelector(
+              "[data-tid*=\"message\" i], [data-tid*=\"chat\" i], [data-testid*=\"message\" i], [data-item-id], time"
+            )
+          );
+        if (!hasMessageHint) {
+          return;
+        }
         const author = firstText(row, [
           "[data-tid=\"threadBodyDisplayName\"]",
           "[data-tid=\"message-author-name\"]",
-          "[data-tid=\"chat-pane-message-sender\"]"
+          "[data-tid=\"chat-pane-message-sender\"]",
+          "[data-tid*=\"display-name\"]",
+          "[data-tid*=\"author\"]"
         ]);
         const body =
           firstText(row, [
             "[data-tid=\"chat-pane-message-content\"]",
             "[data-tid=\"messageBodyContent\"]",
-            "[data-tid=\"richText\"]"
-          ]) || textFromNode(row);
+            "[data-tid=\"richText\"]",
+            "[data-tid*=\"message-body\"]",
+            "[data-tid*=\"message-content\"]",
+            "[data-tid*=\"messageBody\"]",
+            "[data-testid*=\"message\" i]"
+          ]) || rowText;
+        if (!body || body.length < 6) {
+          return;
+        }
         const timestamp = firstText(row, ["[data-tid=\"message-timestamp\"]", "time"]);
         const key =
           row.getAttribute("data-message-id") ||
+          row.getAttribute("data-item-id") ||
           row.id ||
           `${author}|${timestamp}|${body.slice(0, 180)}`;
         addItem(key, author || "Teams", body, "dom-teams");
       }
     );
-    scanRows(["[data-tid=\"messageBodyContent\"]"], (row) => {
-      const body = textFromNode(row);
-      if (!body) {
-        return;
+    scanRows(
+      [
+        "[data-tid=\"messageBodyContent\"]",
+        "[data-tid*=\"messageBody\"]",
+        "[data-tid*=\"message-body\"]",
+        "[data-tid*=\"message-content\"]",
+        "[data-tid*=\"chat-message\"]",
+        "[data-tid*=\"message\" i]",
+        "[data-testid*=\"message\" i]"
+      ],
+      (row) => {
+        const body = textFromNode(row);
+        if (!body || body.length < 6 || body.length > 3000) {
+          return;
+        }
+        const container = row.closest(
+          "[data-tid=\"chat-pane-message\"], [data-tid=\"message-thread-message\"], [role=\"listitem\"], [data-item-id]"
+        );
+        const author = firstText(container || document, [
+          "[data-tid=\"threadBodyDisplayName\"]",
+          "[data-tid=\"message-author-name\"]",
+          "[data-tid*=\"display-name\"]",
+          "[data-tid*=\"author\"]"
+        ]);
+        const key =
+          (container &&
+            (container.getAttribute("data-message-id") ||
+              container.getAttribute("data-item-id") ||
+              container.id)) ||
+          `${author}|${body.slice(0, 180)}`;
+        addItem(key, author || "Teams", body, "dom-teams");
       }
-      const container = row.closest("[data-tid=\"chat-pane-message\"], [data-tid=\"message-thread-message\"]");
-      const author = firstText(container || document, [
-        "[data-tid=\"threadBodyDisplayName\"]",
-        "[data-tid=\"message-author-name\"]"
-      ]);
-      const key =
-        (container && (container.getAttribute("data-message-id") || container.id)) ||
-        `${author}|${body.slice(0, 180)}`;
-      addItem(key, author || "Teams", body, "dom-teams");
-    });
+    );
   } else if (host.includes("mail.google.com")) {
     scanRows(["tr.zA"], (row) => {
       const author = firstText(row, ["span[email]", ".yW span", ".yP"]);
@@ -536,6 +650,249 @@ const OUTLOOK_OPEN_FIRST_MESSAGE_SCRIPT = `(() => {
   };
 })();`;
 
+const TEAMS_DOM_PROBE_SCRIPT = `(() => {
+  function isVisible(node) {
+    if (!node || typeof node.getBoundingClientRect !== "function") {
+      return false;
+    }
+    const style = window.getComputedStyle(node);
+    if (!style || style.display === "none" || style.visibility === "hidden" || Number(style.opacity || "1") === 0) {
+      return false;
+    }
+    const rect = node.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) {
+      return false;
+    }
+    return rect.bottom >= -50 && rect.top <= window.innerHeight + 50;
+  }
+
+  function collectRoots() {
+    const roots = [document];
+    const seenRoots = new Set(roots);
+    for (let index = 0; index < roots.length; index += 1) {
+      const root = roots[index];
+      const nodes = Array.from(root.querySelectorAll("*"));
+      for (const node of nodes) {
+        if (node && node.shadowRoot && !seenRoots.has(node.shadowRoot)) {
+          seenRoots.add(node.shadowRoot);
+          roots.push(node.shadowRoot);
+        }
+      }
+    }
+    return roots;
+  }
+
+  function queryAllFromRoots(roots, selector) {
+    const nodes = [];
+    const seen = new Set();
+    for (const root of roots) {
+      for (const node of Array.from(root.querySelectorAll(selector))) {
+        if (seen.has(node)) {
+          continue;
+        }
+        seen.add(node);
+        nodes.push(node);
+      }
+    }
+    return nodes;
+  }
+
+  const roots = collectRoots();
+  const selectors = [
+    "[data-tid='chat-pane-list-item']",
+    "[data-tid='chat-pane-message']",
+    "[data-tid='message-thread-message']",
+    "[data-tid='messageBodyContent']",
+    "[id^='chat-pane-item_']",
+    "[data-item-id][role='listitem']",
+    "[role='listitem'][data-tid]",
+    "[data-tid*='message' i]",
+    "[data-tid*='chat' i]",
+    "[data-tid*='thread' i]",
+    "[data-testid*='message' i]",
+    "[data-testid*='chat' i]",
+    "[data-item-id]"
+  ];
+  const selectorCounts = [];
+  let totalVisibleMessageNodes = 0;
+
+  for (const selector of selectors) {
+    const matches = queryAllFromRoots(roots, selector);
+    let visibleCount = 0;
+    for (const node of matches) {
+      if (isVisible(node)) {
+        visibleCount += 1;
+      }
+    }
+    if (matches.length > 0 || visibleCount > 0) {
+      selectorCounts.push({
+        selector,
+        totalCount: matches.length,
+        visibleCount
+      });
+    }
+    totalVisibleMessageNodes += visibleCount;
+  }
+
+  const sampleDataTid = [];
+  const seenTid = new Set();
+  for (const node of queryAllFromRoots(roots, "[data-tid]")) {
+    const value = String(node.getAttribute("data-tid") || "").trim();
+    if (!value || seenTid.has(value)) {
+      continue;
+    }
+    seenTid.add(value);
+    sampleDataTid.push(value);
+    if (sampleDataTid.length >= 300) {
+      break;
+    }
+  }
+
+  const sampleDataTestId = [];
+  const seenTestId = new Set();
+  for (const node of queryAllFromRoots(roots, "[data-testid]")) {
+    const value = String(node.getAttribute("data-testid") || "").trim();
+    if (!value || seenTestId.has(value)) {
+      continue;
+    }
+    seenTestId.add(value);
+    sampleDataTestId.push(value);
+    if (sampleDataTestId.length >= 150) {
+      break;
+    }
+  }
+
+  const sampleListItems = [];
+  for (const node of queryAllFromRoots(roots, "[role='listitem'], [data-item-id]")) {
+    if (!isVisible(node)) {
+      continue;
+    }
+    const text = String(node.textContent || "").replace(/\\s+/g, " ").trim();
+    if (text.length < 4) {
+      continue;
+    }
+    sampleListItems.push({
+      dataTid: String(node.getAttribute("data-tid") || ""),
+      dataTestId: String(node.getAttribute("data-testid") || ""),
+      dataItemId: String(node.getAttribute("data-item-id") || ""),
+      text: text.slice(0, 220)
+    });
+    if (sampleListItems.length >= 30) {
+      break;
+    }
+  }
+
+  return {
+    url: location.href,
+    title: document.title || "",
+    readyState: document.readyState || "",
+    rootCount: roots.length,
+    totalVisibleMessageNodes,
+    selectorCounts,
+    sampleDataTid,
+    sampleDataTestId,
+    sampleListItems
+  };
+})();`;
+
+const TEAMS_OPEN_FIRST_MESSAGE_SCRIPT = `(() => {
+  function isVisible(node) {
+    if (!node || typeof node.getBoundingClientRect !== "function") {
+      return false;
+    }
+    const style = window.getComputedStyle(node);
+    if (!style || style.display === "none" || style.visibility === "hidden" || Number(style.opacity || "1") === 0) {
+      return false;
+    }
+    const rect = node.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) {
+      return false;
+    }
+    return rect.bottom >= -50 && rect.top <= window.innerHeight + 50;
+  }
+
+  function collectRoots() {
+    const roots = [document];
+    const seenRoots = new Set(roots);
+    for (let index = 0; index < roots.length; index += 1) {
+      const root = roots[index];
+      const nodes = Array.from(root.querySelectorAll("*"));
+      for (const node of nodes) {
+        if (node && node.shadowRoot && !seenRoots.has(node.shadowRoot)) {
+          seenRoots.add(node.shadowRoot);
+          roots.push(node.shadowRoot);
+        }
+      }
+    }
+    return roots;
+  }
+
+  function queryAllFromRoots(roots, selector) {
+    const nodes = [];
+    const seen = new Set();
+    for (const root of roots) {
+      for (const node of Array.from(root.querySelectorAll(selector))) {
+        if (seen.has(node)) {
+          continue;
+        }
+        seen.add(node);
+        nodes.push(node);
+      }
+    }
+    return nodes;
+  }
+
+  const roots = collectRoots();
+  const selectors = [
+    "[data-tid='chat-pane-list-item']",
+    "[data-tid='chat-pane-message']",
+    "[data-tid='message-thread-message']",
+    "[data-tid='messageBodyContent']",
+    "[id^='chat-pane-item_']",
+    "[data-item-id][role='listitem']",
+    "[role='listitem'][data-tid]",
+    "[data-tid*='message' i]",
+    "[data-tid*='chat' i]",
+    "[data-tid*='thread' i]",
+    "[data-testid*='message' i]",
+    "[data-testid*='chat' i]",
+    "[data-item-id]",
+    "[role='listitem']"
+  ];
+
+  for (const selector of selectors) {
+    const nodes = queryAllFromRoots(roots, selector);
+    for (const node of nodes) {
+      const clickTarget =
+        node.closest("[role='listitem'], [data-item-id], [role='button'], button, a") || node;
+      if (!isVisible(clickTarget)) {
+        continue;
+      }
+      const text = String(node.textContent || clickTarget.textContent || "").replace(/\\s+/g, " ").trim();
+      if (text.length < 4) {
+        continue;
+      }
+      try {
+        clickTarget.scrollIntoView({ block: "center", inline: "nearest" });
+      } catch (_error) {
+        // Ignore scroll issues.
+      }
+      clickTarget.click();
+      return {
+        clicked: true,
+        selector,
+        textSnippet: text.slice(0, 220)
+      };
+    }
+  }
+
+  return {
+    clicked: false,
+    selector: "",
+    textSnippet: ""
+  };
+})();`;
+
 function isOutlookLikeMessageSource(source) {
   const text = String(source || "").toLowerCase();
   return text.includes("dom-office") || text.includes("outlook.");
@@ -545,9 +902,31 @@ function countOutlookCapturedMessagesInHistory() {
   return messageHistory.filter((message) => message.tabId === "office" && isOutlookLikeMessageSource(message.source)).length;
 }
 
+function isTeamsLikeMessageSource(source) {
+  const text = String(source || "").toLowerCase();
+  return text.includes("dom-teams") || text.includes("teams.microsoft.com");
+}
+
+function countTeamsCapturedMessagesInHistory() {
+  return messageHistory.filter((message) => message.tabId === "teams" && isTeamsLikeMessageSource(message.source)).length;
+}
+
 function buildOutlookAutomationRun(reason) {
   return {
     id: newId("outlook_run"),
+    reason: reason || "manual",
+    startedAt: nowIso(),
+    completedAt: "",
+    status: "running",
+    summary: {},
+    steps: [],
+    logPath: ""
+  };
+}
+
+function buildTeamsAutomationRun(reason) {
+  return {
+    id: newId("teams_run"),
     reason: reason || "manual",
     startedAt: nowIso(),
     completedAt: "",
@@ -566,6 +945,14 @@ function pushOutlookAutomationStep(run, kind, details) {
   });
 }
 
+function pushTeamsAutomationStep(run, kind, details) {
+  run.steps.push({
+    at: nowIso(),
+    kind,
+    details: details || {}
+  });
+}
+
 function outlookLastRunPath() {
   if (!diagnosticsDir) {
     return "";
@@ -573,8 +960,27 @@ function outlookLastRunPath() {
   return path.join(diagnosticsDir, OUTLOOK_AUTOMATION_LAST_RUN_FILE);
 }
 
+function teamsLastRunPath() {
+  if (!diagnosticsDir) {
+    return "";
+  }
+  return path.join(diagnosticsDir, TEAMS_AUTOMATION_LAST_RUN_FILE);
+}
+
 function readLastOutlookAutomationRunFromDisk() {
   const logPath = outlookLastRunPath();
+  if (!logPath || !fs.existsSync(logPath)) {
+    return null;
+  }
+  try {
+    return JSON.parse(fs.readFileSync(logPath, "utf8"));
+  } catch (_error) {
+    return null;
+  }
+}
+
+function readLastTeamsAutomationRunFromDisk() {
+  const logPath = teamsLastRunPath();
   if (!logPath || !fs.existsSync(logPath)) {
     return null;
   }
@@ -607,6 +1013,28 @@ function persistOutlookAutomationRun(run) {
   }
 }
 
+function persistTeamsAutomationRun(run) {
+  cachedLastTeamsAutomationRun = run;
+  if (!diagnosticsDir) {
+    return;
+  }
+  try {
+    const timestamp = run.startedAt.replace(/[:.]/g, "-");
+    const runPath = path.join(diagnosticsDir, `teams-capture-run-${timestamp}.json`);
+    const lastPath = teamsLastRunPath();
+    run.logPath = runPath;
+    run.lastLogPath = lastPath;
+    const body = JSON.stringify(run, null, 2);
+    fs.writeFileSync(runPath, body);
+    fs.writeFileSync(lastPath, body);
+  } catch (error) {
+    run.summary = {
+      ...(run.summary || {}),
+      logWriteError: error.message || "Failed writing run log"
+    };
+  }
+}
+
 async function waitForWebContentsIdle(wc, timeoutMs) {
   const startedMs = Date.now();
   while (Date.now() - startedMs < timeoutMs) {
@@ -619,6 +1047,88 @@ async function waitForWebContentsIdle(wc, timeoutMs) {
     await sleep(250);
   }
   return { ok: false, reason: `timed out after ${timeoutMs}ms` };
+}
+
+async function probeTeamsDomInTab(tabId) {
+  const view = tabViews.get(tabId);
+  if (!view || !view.webContents || view.webContents.isDestroyed()) {
+    return { ok: false, error: "tab view unavailable", frameCount: 0, frames: [] };
+  }
+  const frames = collectCaptureFrameTargets(view.webContents);
+  const frameReports = [];
+  let totalVisibleMessageNodes = 0;
+  for (const frame of frames) {
+    const frameUrl = typeof frame.url === "string" ? frame.url : "";
+    try {
+      const result = await frame.executeJavaScript(TEAMS_DOM_PROBE_SCRIPT);
+      const visibleCount = Number((result && result.totalVisibleMessageNodes) || 0);
+      totalVisibleMessageNodes += visibleCount;
+      frameReports.push({
+        frameUrl,
+        url: (result && result.url) || frameUrl,
+        title: (result && result.title) || "",
+        readyState: (result && result.readyState) || "",
+        rootCount: Number((result && result.rootCount) || 0),
+        totalVisibleMessageNodes: visibleCount,
+        selectorCounts: Array.isArray(result && result.selectorCounts) ? result.selectorCounts : [],
+        sampleDataTid: Array.isArray(result && result.sampleDataTid) ? result.sampleDataTid : []
+      });
+    } catch (error) {
+      frameReports.push({
+        frameUrl,
+        error: error.message || "executeJavaScript failed"
+      });
+    }
+  }
+  const firstFrame = frameReports[0] || {};
+  return {
+    ok: true,
+    tabId,
+    frameCount: frameReports.length,
+    totalVisibleMessageNodes,
+    title: firstFrame.title || "",
+    url: firstFrame.url || "",
+    frames: frameReports
+  };
+}
+
+async function waitForTeamsContentReady(tabId, timeoutMs) {
+  const startedMs = Date.now();
+  let lastProbe = null;
+  while (Date.now() - startedMs < timeoutMs) {
+    const probe = await probeTeamsDomInTab(tabId);
+    lastProbe = probe;
+    if (probe && probe.ok && Number(probe.totalVisibleMessageNodes || 0) > 0) {
+      return {
+        ok: true,
+        reason: "visible-message-nodes-detected",
+        waitedMs: Date.now() - startedMs,
+        probe
+      };
+    }
+    const hasMessageCandidates =
+      probe &&
+      Array.isArray(probe.frames) &&
+      probe.frames.some((frame) =>
+        Array.isArray(frame.selectorCounts) &&
+        frame.selectorCounts.some((count) => Number((count && count.totalCount) || 0) > 0)
+      );
+    if (hasMessageCandidates) {
+      return {
+        ok: true,
+        reason: "message-candidate-selectors-detected",
+        waitedMs: Date.now() - startedMs,
+        probe
+      };
+    }
+    await sleep(1000);
+  }
+  return {
+    ok: false,
+    reason: `timed out after ${timeoutMs}ms`,
+    waitedMs: Date.now() - startedMs,
+    probe: lastProbe
+  };
 }
 
 async function tryOpenOutlookMessageInTab(tabId) {
@@ -650,6 +1160,37 @@ async function tryOpenOutlookMessageInTab(tabId) {
     }
   }
   return { clicked: false, error: "no visible message row found", attempts };
+}
+
+async function tryOpenTeamsMessageInTab(tabId) {
+  const view = tabViews.get(tabId);
+  if (!view || !view.webContents || view.webContents.isDestroyed()) {
+    return { clicked: false, error: "tab view unavailable", attempts: [] };
+  }
+  const frames = collectCaptureFrameTargets(view.webContents);
+  const attempts = [];
+  for (const frame of frames) {
+    const frameUrl = typeof frame.url === "string" ? frame.url : "";
+    try {
+      const result = await frame.executeJavaScript(TEAMS_OPEN_FIRST_MESSAGE_SCRIPT);
+      attempts.push({
+        frameUrl,
+        clicked: Boolean(result && result.clicked),
+        selector: (result && result.selector) || "",
+        textSnippet: (result && result.textSnippet) || ""
+      });
+      if (result && result.clicked) {
+        return { clicked: true, frameUrl, selector: result.selector || "", textSnippet: result.textSnippet || "", attempts };
+      }
+    } catch (error) {
+      attempts.push({
+        frameUrl,
+        clicked: false,
+        error: error.message || "executeJavaScript failed"
+      });
+    }
+  }
+  return { clicked: false, error: "no visible teams message row found", attempts };
 }
 
 async function captureVisibleMessagesFromTab(tabId, options = {}) {
@@ -690,7 +1231,21 @@ async function captureVisibleMessagesFromTab(tabId, options = {}) {
     report.completedAt = nowIso();
     return report;
   }
-  report.tabUrl = url;
+
+  if (tabId === "teams") {
+    const normalizedTeamsUrl = resolveTeamsWebUrl(url);
+    if (normalizedTeamsUrl !== url) {
+      report.teamsUrlNormalizedTo = normalizedTeamsUrl;
+      try {
+        await wc.loadURL(normalizedTeamsUrl);
+        const idle = await waitForWebContentsIdle(wc, OUTLOOK_AUTOMATION_NAV_WAIT_MS);
+        report.teamsUrlNormalizationIdle = idle;
+      } catch (error) {
+        report.errors.push(`teams url normalization failed: ${error.message || "unknown error"}`);
+      }
+    }
+  }
+  report.tabUrl = wc.getURL();
 
   domCaptureInFlightTabs.add(tabId);
   try {
@@ -854,6 +1409,116 @@ async function runOutlookCaptureAutomation(reason) {
   }
 }
 
+async function runTeamsCaptureAutomation(reason) {
+  if (teamsAutomationRunInFlight) {
+    return teamsAutomationRunInFlight;
+  }
+
+  const runPromise = (async () => {
+    const run = buildTeamsAutomationRun(reason);
+    try {
+      pushTeamsAutomationStep(run, "start", {
+        activeTabId,
+        hasMainWindow: Boolean(mainWindow),
+        diagnosticsDir: diagnosticsDir || "(not initialized)"
+      });
+
+      const teamsView = tabViews.get("teams");
+      if (!teamsView || !teamsView.webContents || teamsView.webContents.isDestroyed()) {
+        run.status = "failed";
+        run.summary = { error: "Teams tab view is not available." };
+        pushTeamsAutomationStep(run, "failed", run.summary);
+        run.completedAt = nowIso();
+        persistTeamsAutomationRun(run);
+        return run;
+      }
+
+      switchToTab("teams");
+      pushTeamsAutomationStep(run, "switch-tab", {
+        switchedTo: "teams",
+        teamsUrl: teamsView.webContents.getURL()
+      });
+
+      const currentTeamsUrl = teamsView.webContents.getURL();
+      const targetTeamsUrl = resolveTeamsWebUrl(currentTeamsUrl);
+      if (targetTeamsUrl !== currentTeamsUrl) {
+        pushTeamsAutomationStep(run, "navigate-teams-web", {
+          from: currentTeamsUrl || "(empty)",
+          to: targetTeamsUrl
+        });
+        try {
+          await teamsView.webContents.loadURL(targetTeamsUrl);
+        } catch (error) {
+          pushTeamsAutomationStep(run, "navigate-teams-web-error", {
+            error: error.message || "Failed to load Teams web URL"
+          });
+        }
+      }
+
+      const idleResult = await waitForWebContentsIdle(teamsView.webContents, OUTLOOK_AUTOMATION_NAV_WAIT_MS);
+      pushTeamsAutomationStep(run, "wait-idle", idleResult);
+
+      const contentReady = await waitForTeamsContentReady("teams", TEAMS_AUTOMATION_CONTENT_WAIT_MS);
+      pushTeamsAutomationStep(run, "wait-content-ready", contentReady);
+
+      const preCaptureProbe = await probeTeamsDomInTab("teams");
+      pushTeamsAutomationStep(run, "probe-pre-capture", preCaptureProbe);
+
+      const beforeCount = countTeamsCapturedMessagesInHistory();
+      pushTeamsAutomationStep(run, "before-count", { beforeCount });
+
+      const preClickCapture = await captureVisibleMessagesFromTab("teams", { trigger: "automation-pre-click" });
+      pushTeamsAutomationStep(run, "capture-pre-click", preClickCapture);
+
+      const clickResult = await tryOpenTeamsMessageInTab("teams");
+      pushTeamsAutomationStep(run, "open-first-message", clickResult);
+
+      if (clickResult.clicked) {
+        await sleep(OUTLOOK_AUTOMATION_POST_CLICK_WAIT_MS);
+        pushTeamsAutomationStep(run, "wait-post-click", { waitedMs: OUTLOOK_AUTOMATION_POST_CLICK_WAIT_MS });
+      }
+
+      const postClickProbe = await probeTeamsDomInTab("teams");
+      pushTeamsAutomationStep(run, "probe-post-click", postClickProbe);
+
+      const postClickCapture = await captureVisibleMessagesFromTab("teams", { trigger: "automation-post-click" });
+      pushTeamsAutomationStep(run, "capture-post-click", postClickCapture);
+
+      const afterCount = countTeamsCapturedMessagesInHistory();
+      const delta = afterCount - beforeCount;
+      const insertedTotal =
+        Number(preClickCapture.insertedCount || 0) + Number(postClickCapture.insertedCount || 0);
+
+      run.summary = {
+        beforeCount,
+        afterCount,
+        delta,
+        clickedMessage: Boolean(clickResult.clicked),
+        insertedTotal,
+        teamsUrl: teamsView.webContents.getURL(),
+        teamsTitle: teamsView.webContents.getTitle()
+      };
+      run.status = delta > 0 || insertedTotal > 0 ? "passed" : "failed";
+      pushTeamsAutomationStep(run, "summary", run.summary);
+    } catch (error) {
+      run.status = "failed";
+      run.summary = { error: error.message || "Automation failed unexpectedly." };
+      pushTeamsAutomationStep(run, "exception", run.summary);
+    }
+
+    run.completedAt = nowIso();
+    persistTeamsAutomationRun(run);
+    return run;
+  })();
+
+  teamsAutomationRunInFlight = runPromise;
+  try {
+    return await runPromise;
+  } finally {
+    teamsAutomationRunInFlight = null;
+  }
+}
+
 function getLastOutlookAutomationRun() {
   if (cachedLastOutlookAutomationRun) {
     return cachedLastOutlookAutomationRun;
@@ -865,8 +1530,27 @@ function getLastOutlookAutomationRun() {
   return run;
 }
 
+function getLastTeamsAutomationRun() {
+  if (cachedLastTeamsAutomationRun) {
+    return cachedLastTeamsAutomationRun;
+  }
+  const run = readLastTeamsAutomationRunFromDisk();
+  if (run) {
+    cachedLastTeamsAutomationRun = run;
+  }
+  return run;
+}
+
 function shouldAutoRunOutlookAutomation() {
   return process.argv.includes(OUTLOOK_AUTOMATION_AUTORUN_ARG) || process.env.COMMMEFASTERD_OUTLOOK_AUTORUN === "1";
+}
+
+function shouldAutoRunTeamsAutomation() {
+  return process.argv.includes(TEAMS_AUTOMATION_AUTORUN_ARG) || process.env.COMMMEFASTERD_TEAMS_AUTORUN === "1";
+}
+
+function shouldRunCaptureAutorun() {
+  return shouldAutoRunOutlookAutomation() || shouldAutoRunTeamsAutomation();
 }
 
 function requestVisibleMessageCapture(tabId) {
@@ -912,13 +1596,16 @@ function buildTabState(tabId) {
     return { tabId, title: "", url: "", loading: false, canGoBack: false, canGoForward: false };
   }
   const wc = view.webContents;
+  const history = wc.navigationHistory;
+  const canGoBack = history && typeof history.canGoBack === "function" ? history.canGoBack() : wc.canGoBack();
+  const canGoForward = history && typeof history.canGoForward === "function" ? history.canGoForward() : wc.canGoForward();
   return {
     tabId,
     title: wc.getTitle(),
     url: wc.getURL(),
     loading: wc.isLoading(),
-    canGoBack: wc.canGoBack(),
-    canGoForward: wc.canGoForward()
+    canGoBack,
+    canGoForward
   };
 }
 
@@ -931,6 +1618,10 @@ function broadcast(channel, payload) {
 function dbRun(sql, params = []) {
   return new Promise((resolve, reject) => {
     if (!db) {
+      resolve(null);
+      return;
+    }
+    if (shuttingDownForQuit) {
       resolve(null);
       return;
     }
@@ -977,8 +1668,37 @@ function dbAll(sql, params = []) {
 }
 
 function fireAndForgetDb(promise) {
-  promise.catch((_error) => {
+  const tracked = Promise.resolve(promise)
+    .catch((_error) => {
     // Keep app responsive even if DB writes fail.
+    })
+    .finally(() => {
+      pendingDbWritePromises.delete(tracked);
+    });
+  pendingDbWritePromises.add(tracked);
+}
+
+async function waitForPendingDbWrites(timeoutMs) {
+  const startedMs = Date.now();
+  while (pendingDbWritePromises.size > 0 && Date.now() - startedMs < timeoutMs) {
+    const snapshot = Array.from(pendingDbWritePromises);
+    await Promise.race([
+      Promise.allSettled(snapshot),
+      sleep(100)
+    ]);
+  }
+}
+
+async function closeDatabase() {
+  if (!db) {
+    return;
+  }
+  const instance = db;
+  db = null;
+  await new Promise((resolve) => {
+    instance.close(() => {
+      resolve();
+    });
   });
 }
 
@@ -2278,15 +2998,31 @@ function attachViewObservers(tabId, view) {
     emitState();
     insertAppEvent(tabId, "page-title-updated", { title });
   });
-  wc.on("console-message", (_event, level, message, line, sourceId) => {
+  wc.on("console-message", (_event, ...args) => {
+    let level = 0;
+    let message = "";
+    let sourceId = "";
+    let line = 0;
+    if (args[0] && typeof args[0] === "object" && !Array.isArray(args[0])) {
+      const payload = args[0];
+      level = typeof payload.level === "number" ? payload.level : 0;
+      message = typeof payload.message === "string" ? payload.message : "";
+      sourceId = typeof payload.sourceId === "string" ? payload.sourceId : "";
+      line = typeof payload.lineNumber === "number" ? payload.lineNumber : 0;
+    } else {
+      level = typeof args[0] === "number" ? args[0] : 0;
+      message = typeof args[1] === "string" ? args[1] : "";
+      line = typeof args[2] === "number" ? args[2] : 0;
+      sourceId = typeof args[3] === "string" ? args[3] : "";
+    }
     pushConsoleLog({
       id: newId("console"),
       createdAt: nowIso(),
       tabId,
       level,
-      message: message || "",
-      sourceId: sourceId || "",
-      line: line || 0
+      message,
+      sourceId,
+      line
     });
   });
   wc.on("notification-shown", (_event, notification) => {
@@ -2307,7 +3043,9 @@ function createWebTabView(tab) {
   tabViews.set(tab.id, view);
   const wcId = view.webContents.id;
   webContentsToTabId.set(wcId, tab.id);
-  installNetworkObserversForSession(view.webContents.session);
+  if (!shouldRunCaptureAutorun()) {
+    installNetworkObserversForSession(view.webContents.session);
+  }
   view.webContents.on("destroyed", () => {
     webContentsToTabId.delete(wcId);
   });
@@ -2482,6 +3220,12 @@ function wireIpcHandlers() {
   ipcMain.handle("diagnostics:get-last-outlook-capture-automation", async () =>
     getLastOutlookAutomationRun()
   );
+  ipcMain.handle("diagnostics:run-teams-capture-automation", async () =>
+    runTeamsCaptureAutomation("manual")
+  );
+  ipcMain.handle("diagnostics:get-last-teams-capture-automation", async () =>
+    getLastTeamsAutomationRun()
+  );
 
   ipcMain.handle("database:overview", async () => databaseOverview());
   ipcMain.handle("database:table-rows", async (_event, payload) =>
@@ -2509,7 +3253,9 @@ function createMainWindow() {
       createWebTabView(tab);
     }
   }
-  startVisibleMessageCaptureLoop();
+  if (!shouldRunCaptureAutorun()) {
+    startVisibleMessageCaptureLoop();
+  }
   mainWindow.on("resize", setViewBounds);
   mainWindow.on("closed", () => {
     stopVisibleMessageCaptureLoop();
@@ -2534,12 +3280,24 @@ app.whenReady().then(async () => {
   wireIpcHandlers();
   createMainWindow();
 
-  if (shouldAutoRunOutlookAutomation()) {
-    const run = await runOutlookCaptureAutomation("autorun");
-    console.log(`[outlook-capture-automation] status=${run.status} log=${run.logPath || "(none)"}`);
+  const shouldRunOutlook = shouldAutoRunOutlookAutomation();
+  const shouldRunTeams = shouldAutoRunTeamsAutomation();
+  if (shouldRunOutlook || shouldRunTeams) {
+    if (shouldRunOutlook) {
+      const run = await runOutlookCaptureAutomation("autorun");
+      console.log(`[outlook-capture-automation] status=${run.status} log=${run.logPath || "(none)"}`);
+    }
+    if (shouldRunTeams) {
+      const run = await runTeamsCaptureAutomation("autorun");
+      console.log(`[teams-capture-automation] status=${run.status} log=${run.logPath || "(none)"}`);
+    }
+    shuttingDownForQuit = true;
+    stopVisibleMessageCaptureLoop();
+    await waitForPendingDbWrites(6000);
+    await closeDatabase();
     setTimeout(() => {
       app.quit();
-    }, 250);
+    }, 50);
   }
 });
 

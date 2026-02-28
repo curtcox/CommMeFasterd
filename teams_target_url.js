@@ -12,8 +12,15 @@ function resolveTeamsWebUrl(currentUrl) {
   }
 
   const host = String(parsed.hostname || "").toLowerCase();
+  const path = String(parsed.pathname || "").toLowerCase();
 
   if (host === "teams.microsoft.com") {
+    if (path.startsWith("/error/")) {
+      return fallback;
+    }
+    if (path === "/" || path === "") {
+      return fallback;
+    }
     return currentUrl;
   }
 

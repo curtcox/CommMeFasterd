@@ -38,16 +38,11 @@ function isAllowedCaptureFrameUrl(rawUrl) {
   if (!url) {
     return true;
   }
-  if (url.startsWith("http://") || url.startsWith("https://")) {
-    return true;
+  // Ignore devtools frames; keep everything else since some apps render content in non-http schemes.
+  if (url.startsWith("devtools://") || url.startsWith("chrome-devtools://")) {
+    return false;
   }
-  if (url === "about:blank" || url === "about:srcdoc") {
-    return true;
-  }
-  if (url.startsWith("blob:")) {
-    return true;
-  }
-  return false;
+  return true;
 }
 
 module.exports = {
