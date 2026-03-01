@@ -73,6 +73,8 @@ const TABS = [
   { id: "office", label: "Office", url: "https://outlook.office.com/mail/", type: "web" },
   { id: "gmail", label: "Gmail", url: "https://mail.google.com", type: "web" },
   { id: "calendar", label: "Google Calendar", url: "https://calendar.google.com", type: "web" },
+  { id: "google-voice", label: "Google Voice", url: "https://voice.google.com", type: "web" },
+  { id: "elevenlabs", label: "ElevenLabs", url: "https://elevenlabs.io/app", type: "web" },
   { id: "settings", label: "Settings", type: "local" },
   { id: "database", label: "Database", type: "local" }
 ];
