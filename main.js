@@ -39,6 +39,7 @@ const OUTLOOK_AUTOMATION_LAST_RUN_FILE = "outlook-capture-last-run.json";
 const OUTLOOK_AUTOMATION_AUTORUN_ARG = "--outlook-autorun";
 const TEAMS_AUTOMATION_LAST_RUN_FILE = "teams-capture-last-run.json";
 const TEAMS_AUTOMATION_AUTORUN_ARG = "--teams-autorun";
+const APP_ICON_PATH = path.join(__dirname, "assets", "app-icon.png");
 
 const DB_TABLES = [
   "llm_settings",
@@ -104,6 +105,8 @@ const seenDomMessageKeys = new Set();
 const seenDomMessageKeyQueue = [];
 const pendingDbWritePromises = new Set();
 let shuttingDownForQuit = false;
+let quitCleanupCompleted = false;
+let quitCleanupPromise = null;
 let outlookAutomationRunInFlight = null;
 let cachedLastOutlookAutomationRun = null;
 let teamsAutomationRunInFlight = null;
@@ -1702,6 +1705,28 @@ async function closeDatabase() {
   });
 }
 
+async function prepareForQuit() {
+  if (quitCleanupCompleted) {
+    return;
+  }
+  if (quitCleanupPromise) {
+    await quitCleanupPromise;
+    return;
+  }
+  quitCleanupPromise = (async () => {
+    shuttingDownForQuit = true;
+    stopVisibleMessageCaptureLoop();
+    await waitForPendingDbWrites(6000);
+    await closeDatabase();
+    quitCleanupCompleted = true;
+  })();
+  try {
+    await quitCleanupPromise;
+  } finally {
+    quitCleanupPromise = null;
+  }
+}
+
 async function initDatabase() {
   if (!sqlite3) {
     dbReady = false;
@@ -3239,6 +3264,7 @@ function createMainWindow() {
     width: 1480,
     height: 940,
     title: "CommMeFasterd",
+    icon: APP_ICON_PATH,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -3265,6 +3291,10 @@ function createMainWindow() {
 }
 
 app.whenReady().then(async () => {
+  if (process.platform === "darwin" && app.dock) {
+    app.dock.setIcon(APP_ICON_PATH);
+  }
+
   try {
     screenshotsDir = path.join(app.getPath("userData"), "screenshots");
     fs.mkdirSync(screenshotsDir, { recursive: true });
@@ -3291,14 +3321,25 @@ app.whenReady().then(async () => {
       const run = await runTeamsCaptureAutomation("autorun");
       console.log(`[teams-capture-automation] status=${run.status} log=${run.logPath || "(none)"}`);
     }
-    shuttingDownForQuit = true;
-    stopVisibleMessageCaptureLoop();
-    await waitForPendingDbWrites(6000);
-    await closeDatabase();
+    await prepareForQuit();
     setTimeout(() => {
       app.quit();
     }, 50);
   }
+});
+
+app.on("before-quit", (event) => {
+  if (quitCleanupCompleted) {
+    return;
+  }
+  event.preventDefault();
+  void prepareForQuit()
+    .catch((error) => {
+      console.error(`[shutdown] cleanup failed: ${error.message || String(error)}`);
+    })
+    .finally(() => {
+      app.quit();
+    });
 });
 
 app.on("window-all-closed", () => {
