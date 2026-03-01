@@ -90,6 +90,28 @@ function tabButtonClass(tabId) {
   return tabId === currentActiveTab ? "tab-button is-active" : "tab-button";
 }
 
+function tabIconInfo(tab) {
+  if (tab.type === "web" && tab.url) {
+    try {
+      const origin = new URL(tab.url).origin;
+      return {
+        type: "site",
+        src: `https://www.google.com/s2/favicons?domain_url=${encodeURIComponent(origin)}&sz=64`,
+        fallback: "🌐"
+      };
+    } catch (_error) {
+      return { type: "glyph", glyph: "🌐" };
+    }
+  }
+  if (tab.id === "settings") {
+    return { type: "glyph", glyph: "⚙" };
+  }
+  if (tab.id === "database") {
+    return { type: "glyph", glyph: "🗄" };
+  }
+  return { type: "glyph", glyph: "•" };
+}
+
 function dbSubtabClass(table) {
   return table === activeDbTable ? "tab-button is-active" : "tab-button";
 }
@@ -153,7 +175,31 @@ async function renderTabStrip() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = tabButtonClass(tab.id);
-    button.textContent = tab.label;
+    const content = document.createElement("span");
+    content.className = "tab-button-content";
+
+    const iconWrap = document.createElement("span");
+    iconWrap.className = "tab-icon-wrap";
+    const icon = tabIconInfo(tab);
+    if (icon.type === "site") {
+      const img = document.createElement("img");
+      img.className = "tab-site-icon";
+      img.src = icon.src;
+      img.alt = `${tab.label} icon`;
+      img.loading = "eager";
+      img.referrerPolicy = "no-referrer";
+      iconWrap.appendChild(img);
+    } else {
+      iconWrap.textContent = icon.glyph;
+    }
+
+    const label = document.createElement("span");
+    label.className = "tab-label";
+    label.textContent = tab.label;
+
+    content.appendChild(iconWrap);
+    content.appendChild(label);
+    button.appendChild(content);
     button.addEventListener("click", async () => {
       await appApi.tabs.switchTo(tab.id);
     });

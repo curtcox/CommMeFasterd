@@ -22,7 +22,7 @@ try {
   sqlite3 = null;
 }
 
-const TAB_BAR_HEIGHT = 100;
+const TAB_SIDEBAR_WIDTH = 240;
 const MAX_EVENTS = 400;
 const MAX_MESSAGES = 400;
 const MAX_EVALUATIONS = 1200;
@@ -3087,10 +3087,10 @@ function setViewBounds() {
   const [width, height] = mainWindow.getContentSize();
   for (const view of tabViews.values()) {
     view.setBounds({
-      x: 0,
-      y: TAB_BAR_HEIGHT,
-      width,
-      height: Math.max(0, height - TAB_BAR_HEIGHT)
+      x: TAB_SIDEBAR_WIDTH,
+      y: 0,
+      width: Math.max(0, width - TAB_SIDEBAR_WIDTH),
+      height
     });
     view.setAutoResize({ width: true, height: true });
   }
